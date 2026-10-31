@@ -100,7 +100,12 @@ internal static class TlsHandshake
             _ => ssl.SslProtocol.ToString(),
         };
 
-        return $"{protocol}, {ssl.NegotiatedCipherSuite}";
+        var suite = ssl.NegotiatedCipherSuite.ToString();
+        var cipher = suite.Contains("AES_256_GCM", StringComparison.Ordinal) ? "AES-256-GCM"
+            : suite.Contains("AES_128_GCM", StringComparison.Ordinal) ? "AES-128-GCM"
+            : suite.Contains("CHACHA20_POLY1305", StringComparison.Ordinal) ? "ChaCha20-Poly1305"
+            : suite;
+        return $"{protocol} · {cipher}";
     }
 
     private static RemoteDeviceCertificate Verify(SslStream ssl, ValidationState validation)

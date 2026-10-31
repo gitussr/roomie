@@ -128,7 +128,17 @@
                                             </Style>
                                         </TextBlock.Style>
                                     </TextBlock>
-                                    <StackPanel Margin="0,4,0,0" Orientation="Horizontal">
+                                    <WrapPanel Margin="0,4,0,0" Orientation="Horizontal">
+                                        <WrapPanel.Resources>
+                                            <Style TargetType="Button">
+                                                <Setter Property="Margin" Value="0,0,6,4" />
+                                            </Style>
+                                        </WrapPanel.Resources>
+                                        <Button Content="Pair…" Padding="10,1"
+                                                Command="{Binding DataContext.PairCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding DeviceId}"
+                                                Visibility="{Binding CanPair, Converter={StaticResource BoolToVisibility}}"
+                                                AutomationProperties.Name="{Binding Username, StringFormat='Pair with {0}'}" />
                                         <Button Content="Connect" Padding="10,1"
                                                 Command="{Binding DataContext.ConnectCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
                                                 CommandParameter="{Binding DeviceId}"
@@ -139,7 +149,17 @@
                                                 CommandParameter="{Binding DeviceId}"
                                                 Visibility="{Binding CanDisconnect, Converter={StaticResource BoolToVisibility}}"
                                                 AutomationProperties.Name="{Binding Username, StringFormat='Disconnect from {0}'}" />
-                                    </StackPanel>
+                                        <Button Content="Forget…" Padding="10,1"
+                                                Command="{Binding DataContext.ForgetCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding DeviceId}"
+                                                Visibility="{Binding CanForget, Converter={StaticResource BoolToVisibility}}"
+                                                AutomationProperties.Name="{Binding Username, StringFormat='Forget {0}'}" />
+                                        <Button Content="Unblock" Padding="10,1"
+                                                Command="{Binding DataContext.UnblockCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                CommandParameter="{Binding DeviceId}"
+                                                Visibility="{Binding CanUnblock, Converter={StaticResource BoolToVisibility}}"
+                                                AutomationProperties.Name="{Binding Username, StringFormat='Unblock {0}'}" />
+                                    </WrapPanel>
                                 </StackPanel>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
@@ -149,9 +169,82 @@
 
             <GridSplitter Grid.Column="1" Width="1" HorizontalAlignment="Stretch" Background="LightGray" />
 
+            <!-- Pairing panel: shown while a pairing is in progress or its result hasn't been dismissed. -->
+            <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" DataContext="{Binding Pairing}"
+                          Visibility="{Binding IsVisible, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel MaxWidth="460" Margin="24" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="{Binding Title}" FontSize="22" FontWeight="SemiBold" TextAlignment="Center"
+                               TextWrapping="Wrap" />
+
+                    <Border Margin="0,20,0,0" Padding="24,12" HorizontalAlignment="Center" CornerRadius="6"
+                            Background="#F3F3F3" BorderBrush="#D0D0D0" BorderThickness="1"
+                            Visibility="{Binding HasCode, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{Binding Code}" FontSize="44" FontFamily="Consolas" FontWeight="SemiBold"
+                                   AutomationProperties.Name="Verification code" />
+                    </Border>
+
+                    <TextBlock Margin="0,16,0,0" Text="{Binding Instruction}" TextWrapping="Wrap" TextAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsProblem}" Value="True">
+                                        <Setter Property="Foreground" Value="Firebrick" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsSuccess}" Value="True">
+                                        <Setter Property="Foreground" Value="ForestGreen" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+
+                    <WrapPanel Margin="0,20,0,0" HorizontalAlignment="Center">
+                        <WrapPanel.Resources>
+                            <Style TargetType="Button">
+                                <Setter Property="Margin" Value="4" />
+                                <Setter Property="Padding" Value="14,4" />
+                            </Style>
+                        </WrapPanel.Resources>
+                        <Button Content="The codes match" Command="{Binding ApproveCommand}" IsDefault="True"
+                                FontWeight="SemiBold"
+                                Visibility="{Binding CanApprove, Converter={StaticResource BoolToVisibility}}" />
+                        <Button Content="{Binding CancelLabel}" Command="{Binding CancelCommand}"
+                                Visibility="{Binding CanCancel, Converter={StaticResource BoolToVisibility}}" />
+                        <Button Content="Block this device" Command="{Binding BlockCommand}"
+                                Visibility="{Binding CanBlock, Converter={StaticResource BoolToVisibility}}" />
+                        <Button Content="Close" Command="{Binding DismissCommand}"
+                                Visibility="{Binding CanDismiss, Converter={StaticResource BoolToVisibility}}" />
+                    </WrapPanel>
+
+                    <Expander Margin="0,20,0,0" Header="Compare full fingerprints" Foreground="Gray"
+                              Visibility="{Binding HasCode, Converter={StaticResource BoolToVisibility}}">
+                        <StackPanel Margin="0,6,0,0">
+                            <TextBlock Foreground="Gray" TextWrapping="Wrap" FontSize="11"
+                                       Text="For extra assurance, read these out and check each one against the Security fingerprint shown on that computer." />
+                            <TextBlock Margin="0,8,0,0" Text="This computer" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding LocalFingerprint}" FontFamily="Consolas" TextWrapping="Wrap" />
+                            <TextBlock Margin="0,8,0,0" Text="{Binding RemoteLabel}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding RemoteFingerprint}" FontFamily="Consolas" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Expander>
+                </StackPanel>
+            </ScrollViewer>
+
             <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
+                <StackPanel.Style>
+                    <Style TargetType="StackPanel">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Pairing.IsVisible}" Value="True">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </StackPanel.Style>
                 <TextBlock Text="{Binding Title}" FontSize="28" FontWeight="SemiBold"
                            HorizontalAlignment="Center" />
+                <TextBlock Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="Gray" TextAlignment="Center"
+                           TextWrapping="Wrap" MaxWidth="360"
+                           Text="Choose Pair… next to a nearby device to connect it securely with this computer." />
                 <TextBlock Margin="0,4,0,0" HorizontalAlignment="Center" Foreground="Gray">
                     <Run Text="Version" />
                     <Run Text="{Binding AppVersion, Mode=OneWay}" />

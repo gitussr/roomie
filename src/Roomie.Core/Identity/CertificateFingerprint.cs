@@ -21,6 +21,19 @@ public static class CertificateFingerprint
         return Prefix + Convert.ToHexString(SHA256.HashData(subjectPublicKeyInfo));
     }
 
+    /// <summary>The 32 raw hash bytes of a fingerprint in canonical form.</summary>
+    /// <exception cref="FormatException">The value is not <c>SHA256:</c> followed by 64 hex digits.</exception>
+    public static byte[] ToBytes(string fingerprint)
+    {
+        ArgumentNullException.ThrowIfNull(fingerprint);
+        if (!fingerprint.StartsWith(Prefix, StringComparison.Ordinal) || fingerprint.Length != Prefix.Length + 64)
+        {
+            throw new FormatException("Not a SHA-256 fingerprint.");
+        }
+
+        return Convert.FromHexString(fingerprint.AsSpan(Prefix.Length));
+    }
+
     /// <summary>Constant-time comparison of two fingerprints in canonical form.</summary>
     public static bool AreEqual(string? left, string? right)
     {

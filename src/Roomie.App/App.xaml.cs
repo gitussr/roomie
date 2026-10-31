@@ -15,8 +15,10 @@ using Roomie.Core.Identity;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
+using Roomie.Infrastructure.Trust;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Pairing;
 using Serilog;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
@@ -36,6 +38,24 @@ public partial class App : Application
 
         var paths = AppPaths.CreateDefault();
         paths.EnsureCreated();
+
+        JsonTrustStore trust;
+        try
+        {
+            trust = new JsonTrustStore(paths.TrustFile);
+        }
+        catch (Exception ex) when (ex is TrustStoreException or IOException or UnauthorizedAccessException)
+        {
+            // Never start with an empty trust list in place of one that couldn't be read: the next pairing
+            // would overwrite the file and silently drop every paired device.
+            MessageBox.Show(
+                $"Roomie couldn't read the list of paired devices.\n\n{ex.Message}\n\nFile: {paths.TrustFile}\n\nNothing was changed.",
+                "Roomie",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown(1);
+            return;
+        }
 
         _host = Host.CreateDefaultBuilder(e.Args)
             .UseSerilog((_, logger) => logger
@@ -63,12 +83,14 @@ public partial class App : Application
                 services.AddHostedService(sp => sp.GetRequiredService<DiscoveryService>());
 
                 services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
-                // In memory until pairing (phase 4) and the database (phase 7) persist trust.
-                services.AddSingleton<InMemoryTrustStore>();
-                services.AddSingleton<ITrustStore>(sp => sp.GetRequiredService<InMemoryTrustStore>());
+                services.AddSingleton<IDeviceSigner>(sp => sp.GetRequiredService<DeviceIdentityStore>());
+                services.AddSingleton<ITrustStore>(trust);
                 services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion });
                 services.AddSingleton<ConnectionManager>();
                 services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
+
+                services.AddSingleton(new PairingOptions());
+                services.AddSingleton<PairingService>();
 
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<MainWindow>();

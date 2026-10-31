@@ -161,6 +161,85 @@ public sealed partial class ConnectionManager : BackgroundService
         return await session.Completion.ConfigureAwait(false);
     }
 
+    /// <summary>Upgrades a live session after pairing completed on it.</summary>
+    public void MarkTrusted(PeerSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        lock (_gate)
+        {
+            session.MarkTrusted();
+            if (_devices.TryGetValue(session.RemoteDeviceId, out var state) && state.Session == session)
+            {
+                state.State = PeerConnectionState.ConnectedTrusted;
+                state.ChangedAt = _time.GetUtcNow();
+            }
+        }
+
+        LogSessionTrusted(_logger, session.RemoteDeviceId);
+        RaiseChanged();
+    }
+
+    /// <summary>
+    /// Ends trusted sessions whose trust was revoked, and every session with a device that was blocked:
+    /// a session must never keep privileges its device no longer has.
+    /// </summary>
+    private void OnTrustChanged(object? sender, EventArgs e)
+    {
+        var toClose = new List<(PeerSession Session, bool Blocked)>();
+        lock (_gate)
+        {
+            foreach (var state in _devices.Values)
+            {
+                var blocked = _trust.IsBlocked(state.DeviceId);
+                if (blocked && state.Session is null)
+                {
+                    state.State = PeerConnectionState.Blocked;
+                }
+
+                if (state.Session is not { } session)
+                {
+                    if (!blocked && state.State == PeerConnectionState.Blocked)
+                    {
+                        state.State = PeerConnectionState.Disconnected;
+                        state.LastError = null;
+                    }
+
+                    continue;
+                }
+
+                if (blocked || (session.IsTrusted && _trust.FindTrusted(state.DeviceId) is null))
+                {
+                    toClose.Add((session, blocked));
+                    state.ManualDisconnect = true;
+                }
+            }
+        }
+
+        foreach (var (session, blocked) in toClose)
+        {
+            _ = CloseRevokedAsync(session, blocked);
+        }
+
+        RaiseChanged();
+    }
+
+    private async Task CloseRevokedAsync(PeerSession session, bool blocked)
+    {
+        var info = await CloseWithAsync(session, blocked ? GoodbyeReasons.PeerBlocked : GoodbyeReasons.Shutdown,
+            blocked ? "You blocked this device." : "You removed this device.").ConfigureAwait(false);
+        OnSessionClosed(session, info);
+        if (blocked)
+        {
+            SetTerminalState(session.RemoteDeviceId, PeerConnectionState.Blocked, "You blocked this device.");
+        }
+    }
+
+    private static async Task<SessionCloseInfo> CloseWithAsync(PeerSession session, string reason, string description)
+    {
+        await session.CloseAsync(reason, description).ConfigureAwait(false);
+        return await session.Completion.ConfigureAwait(false);
+    }
+
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => Task.Run(() => RunAsync(stoppingToken), stoppingToken);
 
     private async Task RunAsync(CancellationToken cancellationToken)
@@ -169,6 +248,7 @@ public sealed partial class ConnectionManager : BackgroundService
         _credentials = SslStreamCertificateContext.Create(_tls.TlsCertificate, additionalCertificates: null, offline: true);
 
         _interfaces.InterfacesChanged += OnInterfacesChanged;
+        _trust.Changed += OnTrustChanged;
         try
         {
             ReconcileListeners();
@@ -195,6 +275,7 @@ public sealed partial class ConnectionManager : BackgroundService
         finally
         {
             _interfaces.InterfacesChanged -= OnInterfacesChanged;
+            _trust.Changed -= OnTrustChanged;
             await ShutdownAsync().ConfigureAwait(false);
         }
     }
@@ -1008,6 +1089,9 @@ public sealed partial class ConnectionManager : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Identity conflict for {DeviceId}: connected as {Existing}, new connection presented {Presented}")]
     private static partial void LogIdentityConflict(ILogger logger, Guid deviceId, string existing, string presented);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Session with {DeviceId} is now trusted")]
+    private static partial void LogSessionTrusted(ILogger logger, Guid deviceId);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "A device at {Remote} presented this computer's own identity")]
     private static partial void LogSelfConnection(ILogger logger, IPEndPoint remote);

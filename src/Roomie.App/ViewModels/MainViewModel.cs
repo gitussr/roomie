@@ -1,14 +1,17 @@
 using System.Collections.ObjectModel;
+using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Roomie.Core.Configuration;
 using Roomie.Core.Connections;
 using Roomie.Core.Discovery;
 using Roomie.Core.Identity;
+using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Pairing;
 
 namespace Roomie.App.ViewModels;
 
@@ -22,7 +25,10 @@ public sealed record NearbyDevice(
     string Connection,
     string? Problem,
     bool CanConnect,
-    bool CanDisconnect);
+    bool CanDisconnect,
+    bool CanPair,
+    bool CanForget,
+    bool CanUnblock);
 
 public sealed partial class MainViewModel : ObservableObject
 {
@@ -30,17 +36,29 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly PeerRegistry _registry;
     private readonly DiscoveryService _discovery;
     private readonly ConnectionManager _connections;
+    private readonly PairingService _pairing;
+    private readonly ITrustStore _trust;
     private readonly SynchronizationContext _ui;
     private int _refreshQueued;
 
-    public MainViewModel(AppPaths paths, DeviceIdentityStore identityStore, PeerRegistry registry, DiscoveryService discovery, ConnectionManager connections)
+    public MainViewModel(
+        AppPaths paths,
+        DeviceIdentityStore identityStore,
+        PeerRegistry registry,
+        DiscoveryService discovery,
+        ConnectionManager connections,
+        PairingService pairing,
+        ITrustStore trust)
     {
         _identityStore = identityStore;
         _registry = registry;
         _discovery = discovery;
         _connections = connections;
+        _pairing = pairing;
+        _trust = trust;
+        Pairing = new PairingViewModel(pairing);
 
-        // Created on the UI thread; registry and discovery events arrive on background threads.
+        // Created on the UI thread; every service event arrives on a background thread.
         _ui = SynchronizationContext.Current ?? new SynchronizationContext();
 
         DataDirectory = paths.Root;
@@ -55,8 +73,16 @@ public sealed partial class MainViewModel : ObservableObject
         registry.Changed += (_, _) => QueueRefresh();
         discovery.StatusChanged += (_, _) => QueueRefresh();
         connections.Changed += (_, _) => QueueRefresh();
+        pairing.Changed += (_, _) => QueueRefresh();
+        pairing.IncomingRequest += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
+        trust.Changed += (_, _) => QueueRefresh();
         Refresh();
     }
+
+    /// <summary>Another device asked to pair: the window should get the user's attention.</summary>
+    public event EventHandler? AttentionRequested;
+
+    public PairingViewModel Pairing { get; }
 
     public string Title { get; } = "Roomie";
 
@@ -116,6 +142,37 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task DisconnectAsync(Guid deviceId) => await _connections.DisconnectAsync(deviceId);
 
+    [RelayCommand]
+    private async Task PairAsync(Guid deviceId)
+    {
+        if (_pairing.Current is { IsActive: true })
+        {
+            return;
+        }
+
+        await _pairing.StartAsync(deviceId);
+    }
+
+    [RelayCommand]
+    private void Forget(Guid deviceId)
+    {
+        var name = _trust.FindTrusted(deviceId)?.Username ?? DeviceIdFormat.ToDisplayId(deviceId);
+        var answer = MessageBox.Show(
+            $"Forget {name}?\n\nThis computer will stop trusting it and disconnect. To exchange messages again, you'll need to pair again on both computers.",
+            "Roomie",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Question,
+            MessageBoxResult.Cancel);
+
+        if (answer == MessageBoxResult.OK)
+        {
+            _trust.Remove(deviceId);
+        }
+    }
+
+    [RelayCommand]
+    private void Unblock(Guid deviceId) => _trust.Unblock(deviceId);
+
     // Coalesces bursts of background events into one UI update.
     private void QueueRefresh()
     {
@@ -131,24 +188,42 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void Refresh()
     {
+        Pairing.Update(_pairing.Current);
+        var pairingBusy = _pairing.Current is { IsActive: true };
+
         NearbyDevices.Clear();
         var connections = _connections.Snapshot().ToDictionary(c => c.DeviceId);
         var peers = _registry.Snapshot();
+        var trusted = _trust.TrustedPeers.ToDictionary(p => p.DeviceId);
+        var blocked = _trust.BlockedDevices.ToHashSet();
+
+        PeerConnectionInfo ConnectionOf(Guid id) =>
+            connections.GetValueOrDefault(id) ?? new PeerConnectionInfo(id, PeerConnectionState.Disconnected);
 
         foreach (var peer in peers)
         {
             var address = peer.Addresses.Count > 1
                 ? $"{peer.Addresses[0]} (+{peer.Addresses.Count - 1})"
                 : peer.Addresses.Count == 1 ? peer.Addresses[0].ToString() : string.Empty;
-            var connection = connections.GetValueOrDefault(peer.DeviceId) ?? new PeerConnectionInfo(peer.DeviceId, PeerConnectionState.Disconnected);
-            NearbyDevices.Add(ToItem(peer.Username, peer.DisplayId, address, $"Roomie {peer.AppVersion}", connection));
+            NearbyDevices.Add(ToItem(peer.Username, peer.DisplayId, address, $"Roomie {peer.AppVersion}",
+                ConnectionOf(peer.DeviceId), trusted.ContainsKey(peer.DeviceId), blocked.Contains(peer.DeviceId), pairingBusy));
         }
 
-        // A device can stay connected for a while after its announcements stop reaching us.
-        foreach (var connection in connections.Values.Where(c => c.IsConnected && peers.All(p => p.DeviceId != c.DeviceId)))
+        // Connected devices whose announcements stopped reaching us, then paired devices that are offline.
+        var listed = peers.Select(p => p.DeviceId).ToHashSet();
+        foreach (var connection in connections.Values.Where(c => c.IsConnected && !listed.Contains(c.DeviceId)))
         {
-            NearbyDevices.Add(ToItem("(not announcing)", DeviceIdFormat.ToDisplayId(connection.DeviceId),
-                connection.RemoteEndPoint?.Address.ToString() ?? string.Empty, string.Empty, connection));
+            listed.Add(connection.DeviceId);
+            var name = trusted.TryGetValue(connection.DeviceId, out var known) ? known.Username : "(not announcing)";
+            NearbyDevices.Add(ToItem(name, DeviceIdFormat.ToDisplayId(connection.DeviceId),
+                connection.RemoteEndPoint?.Address.ToString() ?? string.Empty, string.Empty, connection,
+                trusted.ContainsKey(connection.DeviceId), isBlocked: false, pairingBusy));
+        }
+
+        foreach (var peer in trusted.Values.Where(p => !listed.Contains(p.DeviceId)))
+        {
+            NearbyDevices.Add(ToItem(peer.Username, DeviceIdFormat.ToDisplayId(peer.DeviceId), "offline", string.Empty,
+                ConnectionOf(peer.DeviceId), isTrusted: true, isBlocked: false, pairingBusy));
         }
 
         var status = _discovery.Status;
@@ -172,19 +247,28 @@ public sealed partial class MainViewModel : ObservableObject
                 : "No devices found.";
     }
 
-    private static NearbyDevice ToItem(string username, string displayId, string address, string version, PeerConnectionInfo connection)
+    private static NearbyDevice ToItem(
+        string username,
+        string displayId,
+        string address,
+        string version,
+        PeerConnectionInfo connection,
+        bool isTrusted,
+        bool isBlocked,
+        bool pairingBusy)
     {
-        var text = connection.State switch
+        var paired = isTrusted ? "paired" : "not paired";
+        var text = isBlocked ? "Blocked" : connection.State switch
         {
             PeerConnectionState.Connecting => "Connecting…",
             PeerConnectionState.Authenticating => "Securing the connection…",
             PeerConnectionState.ConnectedUntrusted => $"Connected · not paired · {connection.Security}",
             PeerConnectionState.ConnectedTrusted => $"Connected · paired · {connection.Security}",
-            PeerConnectionState.Reconnecting => "Reconnecting…",
-            PeerConnectionState.Failed => "Couldn't connect",
+            PeerConnectionState.Reconnecting => "Paired · reconnecting…",
+            PeerConnectionState.Failed => $"Couldn't connect · {paired}",
             PeerConnectionState.IdentityMismatch => "Identity changed: not trusted",
             PeerConnectionState.Blocked => "Blocked",
-            _ => "Not connected · not paired",
+            _ => $"Not connected · {paired}",
         };
 
         if (connection.IsConnected && connection.RemoteFingerprint is { } fingerprint)
@@ -193,10 +277,14 @@ public sealed partial class MainViewModel : ObservableObject
             text += $"\nKey {CertificateFingerprint.ToDisplayString(fingerprint)[..19]}…";
         }
 
-        var canConnect = connection.State is PeerConnectionState.Disconnected or PeerConnectionState.Failed;
+        var canConnect = !isBlocked && connection.State is PeerConnectionState.Disconnected or PeerConnectionState.Failed;
         var canDisconnect = connection.IsConnected || connection.State == PeerConnectionState.Reconnecting;
-        return new NearbyDevice(connection.DeviceId, username, displayId, address, version, text,
-            connection.State == PeerConnectionState.Disconnected && connection.LastError is null ? null : connection.LastError,
-            canConnect, canDisconnect);
+        var canPair = !isTrusted && !isBlocked && !pairingBusy && connection.State != PeerConnectionState.IdentityMismatch;
+        var problem = isBlocked || (connection.State == PeerConnectionState.Disconnected && connection.LastError is null)
+            ? null
+            : connection.LastError;
+
+        return new NearbyDevice(connection.DeviceId, username, displayId, address, version, text, problem,
+            canConnect, canDisconnect, canPair, isTrusted, isBlocked);
     }
 }

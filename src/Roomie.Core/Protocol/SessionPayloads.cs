@@ -88,7 +88,8 @@ public static class SessionPayloads
     public static bool IsEmpty(JsonElement payload) =>
         payload.ValueKind == JsonValueKind.Object && !payload.EnumerateObject().Any();
 
-    private static T? TryDeserialize<T>(JsonElement payload)
+    /// <summary>Strictly deserializes a payload, returning null when it doesn't match <typeparamref name="T"/> exactly.</summary>
+    public static T? TryDeserialize<T>(JsonElement payload)
         where T : class
     {
         try

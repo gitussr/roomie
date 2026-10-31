@@ -29,6 +29,9 @@ public sealed class AppPaths
 
     public string DatabaseFile => Path.Combine(Database, "messenger.db");
     public string SettingsFile => Path.Combine(Config, "settings.json");
+
+    /// <summary>Paired and blocked devices. Kept out of the database folder, so clearing chat data never unpairs.</summary>
+    public string TrustFile => Path.Combine(Config, "trusted-devices.json");
     public string LogFile => Path.Combine(Logs, "application-.log");
 
     /// <summary>%LOCALAPPDATA%\Roomie</summary>

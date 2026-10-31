@@ -7,7 +7,8 @@ using Roomie.Core.Identity;
 namespace Roomie.Network.Connections;
 
 /// <summary>The identity a peer proved in the TLS handshake.</summary>
-public sealed record RemoteDeviceCertificate(Guid DeviceId, string Fingerprint);
+/// <param name="PublicKey">DER SubjectPublicKeyInfo of the device key, for verifying its pairing signatures.</param>
+public sealed record RemoteDeviceCertificate(Guid DeviceId, string Fingerprint, byte[] PublicKey);
 
 /// <summary>
 /// Checks that a peer certificate is a well-formed Roomie device certificate (architecture.md §10,
@@ -78,8 +79,8 @@ public static class DeviceCertificateValidator
             return false;
         }
 
-        var fingerprint = CertificateFingerprint.FromSubjectPublicKeyInfo(certificate.PublicKey.ExportSubjectPublicKeyInfo());
-        result = new RemoteDeviceCertificate(deviceId, fingerprint);
+        var spki = certificate.PublicKey.ExportSubjectPublicKeyInfo();
+        result = new RemoteDeviceCertificate(deviceId, CertificateFingerprint.FromSubjectPublicKeyInfo(spki), spki);
         failure = null;
         return true;
     }

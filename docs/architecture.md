@@ -332,6 +332,38 @@ Both sides must approve. A one-sided approval must not establish a trusted relat
 
 For stronger assurance, also offer full fingerprint verification in an advanced details view. Six-digit codes have limited entropy, so rate-limit failed pairing attempts and require a new session after repeated failures.
 
+#### Wire encodings (as implemented)
+
+"A" is the device that sends `PAIR_REQUEST`, whichever side opened the TLS connection. The transcript names both certificates by role, so the TLS direction doesn't matter.
+
+| Value | Encoding |
+| ----- | -------- |
+| `pub(e)` | 91-byte DER SubjectPublicKeyInfo of a P-256 key; any other curve or length is rejected |
+| `n` | 32 random bytes |
+| `fp(cert)` | 32-byte SHA-256 of the certificate's SubjectPublicKeyInfo (the raw bytes of the `SHA256:` fingerprint) |
+| `deviceId` | 16 bytes, RFC 4122 big-endian order |
+| length prefix | 32-bit big-endian byte count before every transcript field, including the `RMP-PAIR-v1` label and the two fields A appends before signing |
+| signatures | ECDSA P-256 / SHA-256 with the device key, IEEE P1363 (64 bytes), verified with the key from the certificate presented in TLS |
+
+`commitA` hashes its three parts without length prefixes: they have fixed lengths.
+
+Payloads, with binary fields in base64:
+
+| Message | Payload |
+| ------- | ------- |
+| `PAIR_REQUEST` | `pairingId`, `commitment` (32 bytes) |
+| `PAIR_RESPONSE`, `PAIR_REVEAL` | `pairingId`, `ephemeralKey` (91), `nonce` (32), `signature` (64) |
+| `PAIR_APPROVE` | `pairingId` |
+| `PAIR_REJECT` | `pairingId`, `reason`: `DECLINED`, `CANCELLED`, `BUSY`, `TIMEOUT`, `VERIFICATION_FAILED` or `TOO_MANY_ATTEMPTS` |
+
+Rules:
+- One attempt runs at a time. A request arriving during another attempt gets `BUSY`.
+- If both users press Pair at once, the request from the smaller device ID goes ahead and the other side silently drops its own.
+- An attempt fails after 2 minutes.
+- Every non-success except `BUSY` and a plain cancel counts as a failure. After 5 failures with one device in 10 minutes, new attempts are refused. After 3 failures on one session, the session is closed.
+- Only after both `PAIR_APPROVE`s does each side pin the other's fingerprint and upgrade the live session to trusted.
+- Removing or blocking a device ends its session immediately.
+
 ## 3.2 Subsequent connections
 
 Once two devices are paired:

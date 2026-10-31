@@ -9,5 +9,20 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = viewModel;
+        viewModel.AttentionRequested += (_, _) => RequestAttention();
+    }
+
+    /// <summary>
+    /// Brings the window up for an incoming pairing request. When another app has focus, Windows flashes
+    /// the taskbar button instead of switching to it.
+    /// </summary>
+    private void RequestAttention()
+    {
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        Activate();
     }
 }

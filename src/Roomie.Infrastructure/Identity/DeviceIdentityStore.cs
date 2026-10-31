@@ -17,7 +17,7 @@ namespace Roomie.Infrastructure.Identity;
 /// <item><c>identity.json</c>: public metadata. Written last, so its presence marks a completed identity.</item>
 /// </list>
 /// </remarks>
-public sealed class DeviceIdentityStore : ILocalIdentityProvider, ITlsCredentialProvider, IDisposable
+public sealed class DeviceIdentityStore : ILocalIdentityProvider, ITlsCredentialProvider, IDeviceSigner, IDisposable
 {
     public const string MetadataFileName = "identity.json";
     public const string CertificateFileName = "device.crt";
@@ -96,6 +96,17 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, ITlsCredential
                 var certificate = _certificate ?? throw new InvalidOperationException("The device identity has not been loaded.");
                 return _tlsCertificate ??= CreateTlsCertificate(certificate);
             }
+        }
+    }
+
+    public byte[] SignData(ReadOnlySpan<byte> data)
+    {
+        lock (_gate)
+        {
+            var certificate = _certificate ?? throw new InvalidOperationException("The device identity has not been loaded.");
+            using var key = certificate.GetECDsaPrivateKey()
+                ?? throw new InvalidOperationException("The device certificate has no private key.");
+            return key.SignData(data, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
         }
     }
 

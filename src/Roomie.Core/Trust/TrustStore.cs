@@ -1,28 +1,65 @@
 namespace Roomie.Core.Trust;
 
 /// <summary>A device the user has paired with. Its pinned fingerprint is the only proof of its identity.</summary>
+/// <param name="Username">The name the device announced when it was paired. Display only.</param>
 public sealed record TrustedPeer(Guid DeviceId, string Username, string CertificateFingerprint, DateTimeOffset TrustedAt);
 
 /// <summary>Trusted and blocked devices (architecture.md §1.2, §3). Implementations must be thread-safe.</summary>
 public interface ITrustStore
 {
+    /// <summary>Raised after any change, on the thread that made it.</summary>
     event EventHandler? Changed;
+
+    IReadOnlyList<TrustedPeer> TrustedPeers { get; }
+
+    IReadOnlyCollection<Guid> BlockedDevices { get; }
 
     TrustedPeer? FindTrusted(Guid deviceId);
 
     bool IsBlocked(Guid deviceId);
+
+    /// <summary>Pins the device's fingerprint, replacing any earlier pairing with it, and unblocks it.</summary>
+    void Trust(TrustedPeer peer);
+
+    /// <summary>Revokes trust. The device becomes an ordinary discovered device again.</summary>
+    void Remove(Guid deviceId);
+
+    /// <summary>Revokes trust and refuses every future connection from the device.</summary>
+    void Block(Guid deviceId);
+
+    void Unblock(Guid deviceId);
 }
 
-/// <summary>
-/// Keeps trust in memory. Used until pairing (phase 4) and the database (phase 7) persist it, and in tests.
-/// </summary>
-public sealed class InMemoryTrustStore : ITrustStore
+/// <summary>Trust kept in memory only. Used in tests.</summary>
+public class InMemoryTrustStore : ITrustStore
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<Guid, TrustedPeer> _trusted = [];
     private readonly HashSet<Guid> _blocked = [];
 
     public event EventHandler? Changed;
+
+    public IReadOnlyList<TrustedPeer> TrustedPeers
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _trusted.Values.OrderBy(p => p.TrustedAt)];
+            }
+        }
+    }
+
+    public IReadOnlyCollection<Guid> BlockedDevices
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _blocked];
+            }
+        }
+    }
 
     public TrustedPeer? FindTrusted(Guid deviceId)
     {
@@ -43,20 +80,50 @@ public sealed class InMemoryTrustStore : ITrustStore
     public void Trust(TrustedPeer peer)
     {
         ArgumentNullException.ThrowIfNull(peer);
-        lock (_gate)
+        Mutate(() =>
         {
             _trusted[peer.DeviceId] = peer;
-        }
-
-        Changed?.Invoke(this, EventArgs.Empty);
+            _blocked.Remove(peer.DeviceId);
+        });
     }
 
-    public void Block(Guid deviceId)
+    public void Remove(Guid deviceId) => Mutate(() => _trusted.Remove(deviceId));
+
+    public void Block(Guid deviceId) => Mutate(() =>
+    {
+        _trusted.Remove(deviceId);
+        _blocked.Add(deviceId);
+    });
+
+    public void Unblock(Guid deviceId) => Mutate(() => _blocked.Remove(deviceId));
+
+    /// <summary>Replaces the whole contents, e.g. after loading from disk. Doesn't raise <see cref="Changed"/>.</summary>
+    protected void Load(IEnumerable<TrustedPeer> trusted, IEnumerable<Guid> blocked)
     {
         lock (_gate)
         {
-            _blocked.Add(deviceId);
-            _trusted.Remove(deviceId);
+            _trusted.Clear();
+            foreach (var peer in trusted)
+            {
+                _trusted[peer.DeviceId] = peer;
+            }
+
+            _blocked.Clear();
+            _blocked.UnionWith(blocked);
+        }
+    }
+
+    /// <summary>Called inside the lock after each change, so a subclass can persist a consistent snapshot.</summary>
+    protected virtual void OnChanged(IReadOnlyList<TrustedPeer> trusted, IReadOnlyCollection<Guid> blocked)
+    {
+    }
+
+    private void Mutate(Action change)
+    {
+        lock (_gate)
+        {
+            change();
+            OnChanged([.. _trusted.Values.OrderBy(p => p.TrustedAt)], [.. _blocked]);
         }
 
         Changed?.Invoke(this, EventArgs.Empty);

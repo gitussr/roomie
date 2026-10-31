@@ -47,6 +47,7 @@ public sealed partial class PeerSession : IAsyncDisposable
     private readonly TaskCompletionSource<SessionCloseInfo> _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private long _lastReceivedTicks;
     private int _closing;
+    private volatile bool _isTrusted;
 
     internal PeerSession(
         SslStream stream,
@@ -70,7 +71,8 @@ public sealed partial class PeerSession : IAsyncDisposable
         LocalDeviceId = localDeviceId;
         RemoteDeviceId = peer.DeviceId;
         RemoteFingerprint = peer.Fingerprint;
-        IsTrusted = isTrusted;
+        RemotePublicKey = peer.PublicKey;
+        _isTrusted = isTrusted;
         Direction = direction;
         RemoteEndPoint = remoteEndPoint;
         RemoteHello = remoteHello;
@@ -90,7 +92,14 @@ public sealed partial class PeerSession : IAsyncDisposable
 
     public string RemoteFingerprint { get; }
 
-    public bool IsTrusted { get; }
+    /// <summary>DER SubjectPublicKeyInfo of the key the peer authenticated with in TLS.</summary>
+    public byte[] RemotePublicKey { get; }
+
+    /// <summary>
+    /// Whether the peer's pinned fingerprint matched when the session opened, or pairing completed on it.
+    /// Until then only session and pairing messages are accepted.
+    /// </summary>
+    public bool IsTrusted => _isTrusted;
 
     public SessionDirection Direction { get; }
 
@@ -108,6 +117,8 @@ public sealed partial class PeerSession : IAsyncDisposable
     public Task<SessionCloseInfo> Completion => _closed.Task;
 
     public bool IsClosed => Volatile.Read(ref _closing) != 0;
+
+    internal void MarkTrusted() => _isTrusted = true;
 
     internal void Start()
     {
