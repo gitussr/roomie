@@ -17,7 +17,7 @@ namespace Roomie.Infrastructure.Identity;
 /// <item><c>identity.json</c>: public metadata. Written last, so its presence marks a completed identity.</item>
 /// </list>
 /// </remarks>
-public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
+public sealed class DeviceIdentityStore : ILocalIdentityProvider, ITlsCredentialProvider, IDisposable
 {
     public const string MetadataFileName = "identity.json";
     public const string CertificateFileName = "device.crt";
@@ -39,6 +39,7 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
 
     private DeviceIdentity? _identity;
     private X509Certificate2? _certificate;
+    private X509Certificate2? _tlsCertificate;
 
     public DeviceIdentityStore(string identityDirectory, TimeProvider? timeProvider = null)
     {
@@ -75,6 +76,25 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
             lock (_gate)
             {
                 return _certificate ?? throw new InvalidOperationException("The device identity has not been loaded.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The device certificate with its key imported into the current user's CNG key store, created on
+    /// first use. SChannel refuses the in-memory key that <see cref="Certificate"/> carries as a TLS
+    /// credential. That key store is DPAPI-protected for this user like <c>device.key</c>, and without
+    /// <see cref="X509KeyStorageFlags.PersistKeySet"/> the key is deleted from it again on dispose.
+    /// Owned by the store; callers must not dispose it.
+    /// </summary>
+    public X509Certificate2 TlsCertificate
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var certificate = _certificate ?? throw new InvalidOperationException("The device identity has not been loaded.");
+                return _tlsCertificate ??= CreateTlsCertificate(certificate);
             }
         }
     }
@@ -164,6 +184,8 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
     {
         lock (_gate)
         {
+            _tlsCertificate?.Dispose();
+            _tlsCertificate = null;
             _certificate?.Dispose();
             _certificate = null;
             _identity = null;
@@ -202,8 +224,6 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
 
         WriteMetadata(identity);
 
-        // TODO(phase 3): SChannel can refuse ephemeral keys as a TLS server credential. If SslStream rejects
-        // this certificate, re-import it through a PKCS#12 round trip when building the TLS options.
         SetCurrent(identity, certificate);
         return new IdentityLoadResult(identity, outcome, orphanedDirectory);
     }
@@ -251,7 +271,7 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
                 throw new IdentityStoreException("The identity metadata does not match the device certificate.");
             }
 
-            if (DeviceCertificateFactory.ReadDeviceId(publicCertificate) != metadata.DeviceId)
+            if (DeviceCertificateNames.ReadDeviceId(publicCertificate) != metadata.DeviceId)
             {
                 throw new IdentityStoreException("The device ID in the identity metadata does not match the device certificate.");
             }
@@ -331,8 +351,25 @@ public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
         return target;
     }
 
+    private static X509Certificate2 CreateTlsCertificate(X509Certificate2 certificate)
+    {
+        // The PKCS#12 blob only lives in memory, so its password just has to be non-empty.
+        var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        var pfx = certificate.Export(X509ContentType.Pkcs12, password);
+        try
+        {
+            return X509CertificateLoader.LoadPkcs12(pfx, password, X509KeyStorageFlags.UserKeySet);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(pfx);
+        }
+    }
+
     private void SetCurrent(DeviceIdentity identity, X509Certificate2 certificate)
     {
+        _tlsCertificate?.Dispose();
+        _tlsCertificate = null;
         _certificate?.Dispose();
         _certificate = certificate;
         _identity = identity;

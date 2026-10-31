@@ -26,7 +26,6 @@ public static class DiscoveryPacketCodec
 {
     public const string ProtocolName = "roomie";
     public const int ProtocolVersion = 1;
-    public const int MaxAppVersionLength = 32;
 
     private const int MaxProperties = 32;
 
@@ -190,18 +189,13 @@ public static class DiscoveryPacketCodec
             return DiscoveryPacketError.InvalidTcpPort;
         }
 
-        if (!IsValidAppVersion(appVersion))
+        if (!AppVersionFormat.IsValid(appVersion))
         {
             return DiscoveryPacketError.InvalidAppVersion;
         }
 
         return DiscoveryPacketError.None;
     }
-
-    private static bool IsValidAppVersion([NotNullWhen(true)] string? value) =>
-        !string.IsNullOrEmpty(value)
-        && value.Length <= MaxAppVersionLength
-        && value.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '+');
 
     // Canonical lowercase "D" form only, so one device can't appear under several spellings.
     private static bool TryParseDeviceId(string? value, out Guid id)

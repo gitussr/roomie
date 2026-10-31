@@ -453,7 +453,7 @@ Protocol identifier: `RMP/1`
 
 Initial version: 1.0
 
-Transport: TCP + TLS 1.3
+Transport: TCP + TLS 1.3, or TLS 1.2 where Windows lacks 1.3 (see §10)
 
 Serialization: JSON control messages + binary file frames
 
@@ -884,7 +884,7 @@ These are mandatory design requirements, not optional enhancements.
 | Security requirement   | Implementation                               |
 | ---------------------- | -------------------------------------------- |
 | Peer authentication    | Persistent device certificate                |
-| Transport encryption   | TLS 1.3, mutually authenticated              |
+| Transport encryption   | TLS 1.3, or restricted TLS 1.2 on Windows 10; always mutually authenticated |
 | Private key protection | Windows DPAPI                                |
 | Pairing                | Mutual user approval                         |
 | Session verification   | Transcript-bound short authentication string |
@@ -905,6 +905,15 @@ These are mandatory design requirements, not optional enhancements.
 5. Never allow a remote peer to choose arbitrary local file paths.
 6. Never allow an unauthenticated peer to send chat or file-transfer commands.
 7. Never assume the local network is secure simply because it is private.
+
+### TLS versions on Windows 10
+
+Windows 10's TLS stack (SChannel) does not support TLS 1.3, and Roomie must run on Windows 10. Sessions therefore offer TLS 1.3 and TLS 1.2. Windows 11 pairs negotiate 1.3. A TLS 1.2 session is accepted only with an ECDHE-ECDSA suite and authenticated encryption (`AES_128_GCM_SHA256`, `AES_256_GCM_SHA384` or `CHACHA20_POLY1305_SHA256`); anything else is closed right after the handshake. These suites give forward secrecy and AEAD, like TLS 1.3. The remaining difference is that TLS 1.2 sends the device certificate unencrypted. It holds only the device ID and public key, which discovery already broadcasts.
+
+Two Windows details the implementation depends on:
+
+- SChannel can't use an in-memory private key as a TLS credential. The TLS copy of the device certificate has its key imported into the current user's CNG key store, which is DPAPI-protected for that user like `device.key`, and is removed when Roomie exits.
+- The client supplies its certificate through a selection callback rather than `ClientCertificateContext`. With the latter, SChannel only sends a client certificate issued by a CA the server lists, which a self-signed device certificate never is.
 
 ### A subtle but important issue: TLS and pairing
 
@@ -996,7 +1005,7 @@ Network rules
 
 - IPv4 subnet broadcast for discovery.
 - TCP listener on each eligible LAN interface.
-- TLS 1.3 for authenticated sessions.
+- TLS 1.3 for authenticated sessions where both computers support it; restricted TLS 1.2 otherwise (§10).
 - Private Windows network profile.
 - No public internet listener.
 - No cloud dependency.

@@ -12,8 +12,10 @@ using Roomie.App.Views;
 using Roomie.Core.Configuration;
 using Roomie.Core.Discovery;
 using Roomie.Core.Identity;
+using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
+using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
 using Serilog;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
@@ -59,6 +61,14 @@ public partial class App : Application
                 services.AddSingleton<IDiscoveryChannelFactory, UdpDiscoveryChannelFactory>();
                 services.AddSingleton<DiscoveryService>();
                 services.AddHostedService(sp => sp.GetRequiredService<DiscoveryService>());
+
+                services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
+                // In memory until pairing (phase 4) and the database (phase 7) persist trust.
+                services.AddSingleton<InMemoryTrustStore>();
+                services.AddSingleton<ITrustStore>(sp => sp.GetRequiredService<InMemoryTrustStore>());
+                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion });
+                services.AddSingleton<ConnectionManager>();
+                services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
 
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<MainWindow>();
