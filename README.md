@@ -6,7 +6,12 @@ Roomie is a peer-to-peer LAN messenger for Windows. It needs no server, internet
 
 - **Phase 0 (foundation), done.** A WPF app on the .NET Generic Host with dependency injection, MVVM (CommunityToolkit.Mvvm), rolling file logs and the local data layout.
 - **Phase 1 (device identity), done.** On first launch each install generates a random device ID, an ECDSA P-256 key pair and a self-signed X.509 certificate. Peers will pin the certificate's public-key fingerprint (`SHA256:…`). The private key is encrypted with DPAPI for the current Windows user, so an identity folder copied to another PC or account can't be decrypted there. The app moves it aside and creates a new identity instead. The username can be changed without affecting the identity.
-- **Next: Phase 2,** the UDP discovery engine.
+- **Phase 2 (UDP discovery), done.** Roomie opens one UDP socket (port 45820) per active adapter with a private or link-local IPv4 address. It broadcasts a `DISCOVERY_REQUEST` at startup and after network changes, announces itself every 5 seconds, and answers requests by unicast after a random 0–500 ms delay, at most once per requester every 2 seconds. Packets are strictly validated (size, protocol, version, device ID, username, port, source subnet). Devices are keyed by device ID, so one heard over Wi-Fi and Ethernet appears once, and they drop off after 20 seconds of silence. Discovered devices are listed as *not paired*: discovery never connects or trusts anything. If another computer announces this computer's own device ID, a warning is logged.
+- **Next: Phase 3,** the TCP connection manager and TLS.
+
+### Testing discovery on two PCs
+
+Run Roomie on two Windows PCs on the same network. When Windows Firewall asks, allow Roomie on **private** networks, and make sure the network profile is Private. Each PC should list the other under *Nearby devices* within a second or two, and remove it about 20 seconds after it closes. Router "client isolation" (common on guest Wi-Fi) blocks discovery entirely.
 
 ## Build and run
 

@@ -17,7 +17,7 @@ namespace Roomie.Infrastructure.Identity;
 /// <item><c>identity.json</c>: public metadata. Written last, so its presence marks a completed identity.</item>
 /// </list>
 /// </remarks>
-public sealed class DeviceIdentityStore : IDisposable
+public sealed class DeviceIdentityStore : ILocalIdentityProvider, IDisposable
 {
     public const string MetadataFileName = "identity.json";
     public const string CertificateFileName = "device.crt";

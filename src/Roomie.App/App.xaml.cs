@@ -9,8 +9,12 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Roomie.App.ViewModels;
 using Roomie.App.Views;
+using Roomie.Core.Configuration;
+using Roomie.Core.Discovery;
+using Roomie.Core.Identity;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
+using Roomie.Network.Discovery;
 using Serilog;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
@@ -18,6 +22,9 @@ namespace Roomie.App;
 
 public partial class App : Application
 {
+    internal static string AppVersion { get; } =
+        typeof(App).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+
     private IHost? _host;
     private ILogger _logger = NullLogger.Instance;
 
@@ -42,7 +49,17 @@ public partial class App : Application
             {
                 services.Configure<ConsoleLifetimeOptions>(options => options.SuppressStatusMessages = true);
                 services.AddSingleton(paths);
+                services.AddSingleton(TimeProvider.System);
                 services.AddSingleton(_ => new DeviceIdentityStore(paths.Identity));
+                services.AddSingleton<ILocalIdentityProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
+
+                services.AddSingleton(new DiscoveryOptions { AppVersion = AppVersion });
+                services.AddSingleton(_ => new PeerRegistry(NetworkDefaults.OfflineTimeout));
+                services.AddSingleton<ILanInterfaceProvider, SystemLanInterfaceProvider>();
+                services.AddSingleton<IDiscoveryChannelFactory, UdpDiscoveryChannelFactory>();
+                services.AddSingleton<DiscoveryService>();
+                services.AddHostedService(sp => sp.GetRequiredService<DiscoveryService>());
+
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<MainWindow>();
             })
@@ -51,15 +68,16 @@ public partial class App : Application
         _logger = _host.Services.GetRequiredService<ILogger<App>>();
         DispatcherUnhandledException += OnDispatcherUnhandledException;
 
-        await _host.StartAsync();
-
         LogStarted(_logger, paths.Root);
 
+        // The identity must be loaded before the host starts: discovery announces it.
         if (!LoadIdentity(_host.Services.GetRequiredService<DeviceIdentityStore>()))
         {
             Shutdown(1);
             return;
         }
+
+        await _host.StartAsync();
 
         MainWindow = _host.Services.GetRequiredService<MainWindow>();
         MainWindow.Show();

@@ -58,11 +58,61 @@
                     </StackPanel>
                 </Border>
 
-                <StackPanel Margin="12">
-                    <TextBlock Text="Chats" FontSize="18" FontWeight="SemiBold" />
-                    <TextBlock Margin="0,8,0,0" Foreground="Gray" TextWrapping="Wrap"
-                               Text="No peers yet." />
-                </StackPanel>
+                <DockPanel Margin="12">
+                    <StackPanel DockPanel.Dock="Top">
+                        <TextBlock Text="Nearby devices" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Margin="0,2,0,0" Foreground="Gray" TextWrapping="Wrap" FontSize="11"
+                                   Text="Names are chosen by each device and aren't verified until you pair." />
+                        <TextBlock Margin="0,8,0,0" Text="{Binding DiscoveryProblem}" Foreground="Firebrick"
+                                   TextWrapping="Wrap">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Style.Triggers>
+                                        <Trigger Property="Text" Value="">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </Trigger>
+                                        <Trigger Property="Text" Value="{x:Null}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Margin="0,8,0,0" Text="{Binding EmptyListHint}" Foreground="Gray"
+                                   TextWrapping="Wrap">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Style.Triggers>
+                                        <Trigger Property="Text" Value="">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </StackPanel>
+
+                    <ListBox Margin="0,8,0,0" ItemsSource="{Binding NearbyDevices}" BorderThickness="0"
+                             HorizontalContentAlignment="Stretch"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             AutomationProperties.Name="Nearby devices">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:NearbyDevice}">
+                                <StackPanel Margin="0,4">
+                                    <TextBlock Text="{Binding Username}" FontWeight="SemiBold"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Foreground="Gray" FontFamily="Consolas" FontSize="11"
+                                               TextTrimming="CharacterEllipsis">
+                                        <Run Text="{Binding DisplayId, Mode=OneWay}" />
+                                        <Run Text="·" />
+                                        <Run Text="{Binding Address, Mode=OneWay}" />
+                                    </TextBlock>
+                                    <TextBlock Text="{Binding Details}" Foreground="Gray" FontSize="11" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
             </DockPanel>
 
             <GridSplitter Grid.Column="1" Width="1" HorizontalAlignment="Stretch" Background="LightGray" />
