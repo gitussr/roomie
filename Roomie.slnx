@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Roomie.App/Roomie.App.csproj" />
+    <Project Path="src/Roomie.Core/Roomie.Core.csproj" />
+    <Project Path="src/Roomie.Infrastructure/Roomie.Infrastructure.csproj" />
+    <Project Path="src/Roomie.Network/Roomie.Network.csproj" />
+    <Project Path="src/Roomie.Tests/Roomie.Tests.csproj" />
+  </Folder>
+</Solution>

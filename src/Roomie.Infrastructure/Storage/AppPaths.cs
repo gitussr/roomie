@@ -1,0 +1,47 @@
+namespace Roomie.Infrastructure.Storage;
+
+/// <summary>
+/// Local data layout (pre-architecture.md §9). Identity lives apart from chat data so that
+/// clearing history can never delete the device's cryptographic identity.
+/// </summary>
+public sealed class AppPaths
+{
+    public AppPaths(string rootDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+
+        Root = Path.GetFullPath(rootDirectory);
+        Database = Path.Combine(Root, "database");
+        Downloads = Path.Combine(Root, "files", "downloads");
+        Attachments = Path.Combine(Root, "files", "attachments");
+        Logs = Path.Combine(Root, "logs");
+        Config = Path.Combine(Root, "config");
+        Identity = Path.Combine(Root, "identity");
+    }
+
+    public string Root { get; }
+    public string Database { get; }
+    public string Downloads { get; }
+    public string Attachments { get; }
+    public string Logs { get; }
+    public string Config { get; }
+    public string Identity { get; }
+
+    public string DatabaseFile => Path.Combine(Database, "messenger.db");
+    public string SettingsFile => Path.Combine(Config, "settings.json");
+    public string LogFile => Path.Combine(Logs, "application-.log");
+
+    /// <summary>%LOCALAPPDATA%\Roomie</summary>
+    public static AppPaths CreateDefault() =>
+        new(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Roomie"));
+
+    public void EnsureCreated()
+    {
+        foreach (var directory in new[] { Database, Downloads, Attachments, Logs, Config, Identity })
+        {
+            Directory.CreateDirectory(directory);
+        }
+    }
+}
