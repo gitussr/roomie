@@ -182,7 +182,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         var name = _trust.FindTrusted(deviceId)?.Username ?? DeviceIdFormat.ToDisplayId(deviceId);
         var answer = MessageBox.Show(
-            $"Forget {name}?\n\nThis computer will stop trusting it and disconnect. To exchange messages again, you'll need to pair again on both computers.",
+            $"Forget {name}?\n\nThis computer will stop trusting it and disconnect. To exchange messages again, you'll need to pair again on both computers.\n\nYour messages with it stay on this computer, and any still waiting are sent if you pair again.",
             "Roomie",
             MessageBoxButton.OKCancel,
             MessageBoxImage.Question,
@@ -255,7 +255,7 @@ public sealed partial class MainViewModel : ObservableObject
         IsChatVisible = Chat.IsOpen && !Pairing.IsVisible;
         IsWelcomeVisible = !Chat.IsOpen && !Pairing.IsVisible;
 
-        var unread = _messages.GetConversations().ToDictionary(c => c.PeerId, c => c.UnreadCount);
+        var unread = ReadUnreadCounts();
         var totalUnread = unread.Values.Sum();
         WindowTitle = totalUnread > 0 ? $"({totalUnread}) {Title}" : Title;
 
@@ -314,6 +314,19 @@ public sealed partial class MainViewModel : ObservableObject
                   + "If it is, check that Windows Firewall allows Roomie on private networks and that both "
                   + "networks are set to Private."
                 : "No devices found.";
+    }
+
+    private Dictionary<Guid, int> ReadUnreadCounts()
+    {
+        try
+        {
+            return _messages.GetActiveConversations().ToDictionary(c => c.PeerId, c => c.UnreadCount);
+        }
+        catch (MessageStoreException)
+        {
+            // The device list still works without the counts. The store logged the failure.
+            return [];
+        }
     }
 
     private static NearbyDevice ToItem(

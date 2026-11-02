@@ -95,9 +95,18 @@ public sealed partial class MessagingService : BackgroundService
                 : "Type a message first.");
         }
 
-        var now = _time.GetUtcNow();
+        // Whole milliseconds, like the wire and the store, so every copy of this message has the same timestamp.
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(_time.GetUtcNow().ToUnixTimeMilliseconds());
         var message = new StoredMessage(Guid.CreateVersion7(now), peerId, MessageDirection.Outgoing, content, now, DeliveryState.Pending);
-        _store.AddOutgoing(message);
+        try
+        {
+            _store.AddOutgoing(message);
+        }
+        catch (MessageStoreException)
+        {
+            return new MessageSendResult(null, "Roomie couldn't save this message, so it wasn't sent. Check that the disk has free space, then try again.");
+        }
+
         RaiseChanged(peerId);
         Enqueue(peerId);
         return new MessageSendResult(message, null);
@@ -106,10 +115,17 @@ public sealed partial class MessagingService : BackgroundService
     /// <summary>The user is looking at this conversation: its messages count as read, and the sender is told.</summary>
     public void MarkRead(Guid peerId)
     {
-        if (_store.MarkIncomingRead(peerId))
+        try
         {
-            RaiseChanged(peerId);
-            Enqueue(peerId);
+            if (_store.MarkIncomingRead(peerId))
+            {
+                RaiseChanged(peerId);
+                Enqueue(peerId);
+            }
+        }
+        catch (MessageStoreException)
+        {
+            // Still unread, so the next update tries again.
         }
     }
 
@@ -189,9 +205,16 @@ public sealed partial class MessagingService : BackgroundService
 
     private void EnqueueAllWaiting()
     {
-        foreach (var conversation in _store.GetConversations().Where(c => c.HasWaitingWork))
+        try
         {
-            Enqueue(conversation.PeerId);
+            foreach (var conversation in _store.GetActiveConversations().Where(c => c.HasWaitingWork))
+            {
+                Enqueue(conversation.PeerId);
+            }
+        }
+        catch (MessageStoreException)
+        {
+            // The next sweep looks again.
         }
     }
 
@@ -218,7 +241,7 @@ public sealed partial class MessagingService : BackgroundService
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
-        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException)
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or MessageStoreException)
         {
             // Whatever wasn't sent stays waiting, and goes out when the device is back.
             LogSendFailed(_logger, peerId, ex.Message);
@@ -327,6 +350,7 @@ public sealed partial class MessagingService : BackgroundService
             throw new RmpProtocolException(RmpErrorCodes.InvalidFrame, "The message belongs to another conversation.");
         }
 
+        // If this throws, no acknowledgement goes out and the sender tries again later.
         var stored = new StoredMessage(message.MessageId, peerId, MessageDirection.Incoming, chat.Content, message.Timestamp, DeliveryState.Delivered);
         if (_store.TryAddIncoming(stored))
         {

@@ -16,6 +16,7 @@ using Roomie.Core.Messaging;
 using Roomie.Core.Protocol;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
+using Roomie.Infrastructure.Messaging;
 using Roomie.Infrastructure.Storage;
 using Roomie.Infrastructure.Trust;
 using Roomie.Network.Connections;
@@ -95,7 +96,8 @@ public partial class App : Application
                 services.AddSingleton(new PairingOptions());
                 services.AddSingleton<PairingService>();
 
-                services.AddSingleton<IMessageStore, InMemoryMessageStore>(_ => new InMemoryMessageStore());
+                services.AddSingleton(sp => new SqliteMessageStore(paths.DatabaseFile, sp.GetRequiredService<ILogger<SqliteMessageStore>>()));
+                services.AddSingleton<IMessageStore>(sp => sp.GetRequiredService<SqliteMessageStore>());
                 services.AddSingleton(new MessagingOptions());
                 services.AddSingleton<MessagingService>();
                 services.AddHostedService(sp => sp.GetRequiredService<MessagingService>());
@@ -117,6 +119,12 @@ public partial class App : Application
             return;
         }
 
+        if (!OpenMessageStore(_host.Services, paths))
+        {
+            Shutdown(1);
+            return;
+        }
+
         // Services claim their message types when created, so create them before sessions can open.
         _host.Services.GetRequiredService<PairingService>();
         _host.Services.GetRequiredService<MessagingService>();
@@ -127,12 +135,23 @@ public partial class App : Application
         MainWindow.Show();
     }
 
-    protected override async void OnExit(ExitEventArgs e)
+    protected override void OnExit(ExitEventArgs e)
     {
-        if (_host is not null)
+        if (_host is { } host)
         {
-            await _host.StopAsync(TimeSpan.FromSeconds(5));
-            _host.Dispose();
+            // This has to finish before returning, because the process ends soon after: nothing awaited here
+            // would ever resume. It waits on a pool thread, so no service can need the thread that is blocked.
+            // Disposing closes the database and removes the TLS key from the user's key store.
+            try
+            {
+                Task.Run(() => host.StopAsync(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or AggregateException)
+            {
+                LogStopFailed(_logger, ex);
+            }
+
+            host.Dispose();
         }
 
         base.OnExit(e);
@@ -174,6 +193,26 @@ public partial class App : Application
         return true;
     }
 
+    private bool OpenMessageStore(IServiceProvider services, AppPaths paths)
+    {
+        try
+        {
+            services.GetRequiredService<SqliteMessageStore>();
+            return true;
+        }
+        catch (MessageStoreException ex)
+        {
+            // Never start over with an empty database: the messages in this one may still be recoverable.
+            LogMessageStoreFailed(_logger, ex);
+            MessageBox.Show(
+                $"Roomie couldn't open your saved messages.\n\n{ex.Message}\n\nFile: {paths.DatabaseFile}\n\nNothing was changed.",
+                "Roomie",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return false;
+        }
+    }
+
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
         LogUnhandledUiException(_logger, e.Exception);
@@ -190,6 +229,12 @@ public partial class App : Application
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Device identity could not be loaded")]
     private static partial void LogIdentityLoadFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "The message database could not be opened")]
+    private static partial void LogMessageStoreFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Roomie didn't stop cleanly")]
+    private static partial void LogStopFailed(ILogger logger, Exception exception);
 
     [LoggerMessage(Level = LogLevel.Critical, Message = "Unhandled UI exception")]
     private static partial void LogUnhandledUiException(ILogger logger, Exception exception);

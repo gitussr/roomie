@@ -15,7 +15,13 @@ public sealed record ChatBubble(Guid MessageId, string Text, bool IsMine, string
 /// <summary>The open conversation. The whole list is rebuilt from the store on every change.</summary>
 public sealed partial class ChatViewModel(MessagingService messaging, IMessageStore store, ITrustStore trust) : ObservableObject
 {
+    /// <summary>The panel creates a control per message, so a long history can't all be shown until it can page.</summary>
+    public const int MaxShownMessages = 500;
+
     public ObservableCollection<ChatBubble> Messages { get; } = [];
+
+    [ObservableProperty]
+    private bool _hasOlderMessages;
 
     public Guid? PeerId { get; private set; }
 
@@ -80,7 +86,18 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
         CanCompose = peer is not null && !trust.IsBlocked(peerId);
         Problem = CanCompose ? messaging.GetDeliveryProblem(peerId) : "This device isn't paired, so you can't send it messages.";
 
-        Sync(store.GetConversation(peerId).Select(ToBubble).ToList());
+        try
+        {
+            // One more than is shown, to tell whether there are older messages.
+            var messages = store.GetConversation(peerId, MaxShownMessages + 1);
+            HasOlderMessages = messages.Count > MaxShownMessages;
+            Sync(messages.Skip(messages.Count - Math.Min(messages.Count, MaxShownMessages)).Select(ToBubble).ToList());
+        }
+        catch (MessageStoreException)
+        {
+            // What's on screen stays. The store logged the failure.
+            Problem = "Roomie can't read your saved messages right now.";
+        }
     }
 
     private bool CanSend() => CanCompose && !string.IsNullOrWhiteSpace(Draft);
@@ -112,6 +129,14 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
     // Changes only what differs, so the scroll position and any selected text survive an update.
     private void Sync(List<ChatBubble> wanted)
     {
+        // A long conversation drops its oldest message as a new one arrives. Removing it here keeps the
+        // new one an addition, which is what scrolls the panel down.
+        var wantedIds = wanted.Select(m => m.MessageId).ToHashSet();
+        while (Messages.Count > 0 && !wantedIds.Contains(Messages[0].MessageId))
+        {
+            Messages.RemoveAt(0);
+        }
+
         for (var i = 0; i < wanted.Count; i++)
         {
             if (i >= Messages.Count)

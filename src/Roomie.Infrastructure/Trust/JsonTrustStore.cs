@@ -6,8 +6,8 @@ namespace Roomie.Infrastructure.Trust;
 
 /// <summary>
 /// Trusted and blocked devices in <c>config\trusted-devices.json</c>, written atomically on every change.
-/// Kept apart from chat data, so clearing history never unpairs anything. Phase 7 moves this into the
-/// database.
+/// Kept out of the message database on purpose: clearing or losing history must never unpair anything, and a
+/// damaged database must not take the list of trusted keys with it.
 /// </summary>
 public sealed class JsonTrustStore : InMemoryTrustStore
 {

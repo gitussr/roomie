@@ -296,11 +296,15 @@
                             </TextBox>
                         </DockPanel>
                         <TextBlock Margin="0,6,0,0" Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                                   Text="Enter sends, Shift+Enter starts a new line. In this version, messages are kept only until Roomie closes." />
+                                   Text="Enter sends, Shift+Enter starts a new line. Messages are saved on this computer." />
                     </StackPanel>
                 </Border>
 
                 <ScrollViewer x:Name="MessageScroller" VerticalScrollBarVisibility="Auto" Padding="16,8">
+                    <StackPanel>
+                    <TextBlock Margin="0,0,0,8" HorizontalAlignment="Center" Foreground="Gray" FontSize="11"
+                               Text="Showing the latest 500 messages. Older ones are saved on this computer."
+                               Visibility="{Binding Chat.HasOlderMessages, Converter={StaticResource BoolToVisibility}}" />
                     <ItemsControl ItemsSource="{Binding Chat.Messages}" Focusable="False" AutomationProperties.Name="Messages">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type vm:ChatBubble}">
@@ -330,6 +334,7 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    </StackPanel>
                 </ScrollViewer>
             </DockPanel>
 

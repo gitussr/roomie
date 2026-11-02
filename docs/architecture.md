@@ -757,7 +757,18 @@ Rules:
 - **Display order** is by timestamp. Equal timestamps keep their arrival order, because timestamps on the wire have millisecond precision.
 - **Group copies** are refused with `UNSUPPORTED_MESSAGE` until Phase 8.
 
-Phase 6 keeps messages in memory behind `IMessageStore`, so history and waiting messages are lost when Roomie closes, and the conversation panel says so. Phase 7 replaces this with SQLite.
+### Message storage as implemented
+
+Messages live in `database\messenger.db`, in one SQLite table for now. The other tables in §11 arrive with the phases that need them.
+
+- **Durability.** Each write commits before the call returns, in WAL mode with `synchronous = FULL`. WAL's usual `NORMAL` setting can lose the latest commits in a power cut, and `MESSAGE_ACK` promises the message is stored. A write takes about 15–35 ms on the development PC.
+- **Duplicates.** `UNIQUE (peer_id, direction, message_id)` is the `(message_id, sender_id)` rule above: an incoming message's sender is its peer, and an outgoing message's sender is this device. Phase 8 will need to revisit this, because a group conversation has several senders.
+- **Restarts.** Waiting messages, unacknowledged messages and owed read receipts are all in the database, so a restart loses nothing. They go out on the next session, with the same `messageId` and `timestamp`. Which messages are in flight isn't saved, so anything unacknowledged is simply sent again, and the recipient recognizes it.
+- **Failures.** If a write fails, nothing is acknowledged and the sender retries. If saving a new outgoing message fails, the user is told and keeps the text. Roomie keeps running through read and write failures.
+- **Opening.** Schema changes are ordered migrations tracked by `PRAGMA user_version`, each in its own transaction. A database that is damaged or from a newer Roomie is refused with an explanation and left untouched, never recreated.
+- **Retention.** History is kept with no limit and isn't deleted when a device is forgotten. Messages still waiting are sent if that device is paired again. The conversation panel shows the latest 500 messages until it can page through older ones.
+- **Not encrypted at rest.** The database is protected only by the Windows account's permissions on `%LOCALAPPDATA%`. Anyone who can read that account's files can read the messages.
+- **Trust stays in `config\trusted-devices.json`,** not in this database, so clearing or losing history can't unpair anything, and a damaged database can't take the trusted keys with it. Identity stays in `identity\` for the same reason. §11 lists these as tables, but this separation is what its last paragraph asks for.
 
 ### Offline messages
 
