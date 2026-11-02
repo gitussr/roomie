@@ -15,13 +15,6 @@ using Roomie.Network.Discovery;
 
 namespace Roomie.Network.Connections;
 
-public sealed class PeerMessageEventArgs(PeerSession session, RmpEnvelope message) : EventArgs
-{
-    public PeerSession Session { get; } = session;
-
-    public RmpEnvelope Message { get; } = message;
-}
-
 /// <summary>
 /// Owns every TCP/TLS session (architecture.md §4.2): a listener per eligible LAN interface, outbound
 /// connections, the HELLO exchange, one session per device, duplicate resolution, and automatic
@@ -78,6 +71,7 @@ public sealed partial class ConnectionManager : BackgroundService
         _options = options;
         _time = time;
         _logger = logger;
+        Dispatcher = new RmpDispatcher(logger);
         _pendingHandshakes = new SemaphoreSlim(options.MaxPendingHandshakes);
         _inboundLimiter = new SlidingWindowRateLimiter(time, options.MaxInboundPerAddressPerMinute, TimeSpan.FromMinutes(1));
     }
@@ -88,8 +82,8 @@ public sealed partial class ConnectionManager : BackgroundService
     /// <summary>Raised when a session becomes the active session for its device.</summary>
     public event EventHandler<PeerSession>? SessionOpened;
 
-    /// <summary>Messages from any session that the session layer doesn't handle itself.</summary>
-    public event EventHandler<PeerMessageEventArgs>? MessageReceived;
+    /// <summary>Where services register for the message types they own. Register before the host starts.</summary>
+    public RmpDispatcher Dispatcher { get; }
 
     public IReadOnlyList<IPEndPoint> ListeningEndPoints => _listeningEndPoints;
 
@@ -638,14 +632,14 @@ public sealed partial class ConnectionManager : BackgroundService
                 return rejection;
             }
 
-            if (hello.MinimumSupportedVersion > OurProtocolVersion || hello.ProtocolVersion < OurMinimumVersion)
+            var negotiated = RmpNegotiatedSession.Negotiate(ourHello, hello);
+            if (negotiated is null)
             {
                 await SendQuietlyAsync(ssl, RmpMessageTypes.Error, SessionPayloads.ToElement(new ErrorPayload(RmpErrorCodes.UnsupportedVersion, "Incompatible Roomie protocol version.")), localId, peer.DeviceId).ConfigureAwait(false);
                 return $"The other device runs Roomie {hello.ApplicationVersion}, which can't talk to this version.";
             }
 
-            var session = new PeerSession(ssl, localId, peer, trusted, direction, remote, hello,
-                _options.HeartbeatInterval, _options.MissedHeartbeatThreshold, _time, _logger);
+            var session = new PeerSession(ssl, localId, peer, trusted, direction, remote, hello, negotiated, Dispatcher, _options, _time, _logger);
             keepStream = true;
             Register(session);
             return null;
@@ -787,8 +781,7 @@ public sealed partial class ConnectionManager : BackgroundService
 
         if (loser != session)
         {
-            LogSessionOpened(_logger, session.RemoteDeviceId, session.Direction, session.RemoteEndPoint, session.Security, session.IsTrusted);
-            session.MessageReceived += (_, message) => MessageReceived?.Invoke(this, new PeerMessageEventArgs(session, message));
+            LogSessionOpened(_logger, session.RemoteDeviceId, session.Direction, session.RemoteEndPoint, session.Security, session.IsTrusted, session.ProtocolVersion, session.Capabilities);
             _ = ObserveAsync(session);
             session.Start();
             SessionOpened?.Invoke(this, session);
@@ -1078,8 +1071,8 @@ public sealed partial class ConnectionManager : BackgroundService
     [LoggerMessage(Level = LogLevel.Information, Message = "Connecting to {DeviceId} failed: {Reason}")]
     private static partial void LogConnectFailed(ILogger logger, Guid deviceId, string reason);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Session with {DeviceId} opened ({Direction}, {Remote}, {Security}, trusted: {Trusted})")]
-    private static partial void LogSessionOpened(ILogger logger, Guid deviceId, SessionDirection direction, IPEndPoint remote, string security, bool trusted);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Session with {DeviceId} opened ({Direction}, {Remote}, {Security}, trusted: {Trusted}, RMP/{ProtocolVersion}, capabilities: {Capabilities})")]
+    private static partial void LogSessionOpened(ILogger logger, Guid deviceId, SessionDirection direction, IPEndPoint remote, string security, bool trusted, int protocolVersion, IReadOnlySet<string> capabilities);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Duplicate session with {DeviceId}; keeping the one initiated by the smaller ID, closing the one initiated by {LoserInitiator}")]
     private static partial void LogDuplicateSession(ILogger logger, Guid deviceId, Guid loserInitiator);

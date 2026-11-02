@@ -109,6 +109,9 @@ public partial class App : Application
             return;
         }
 
+        // Services claim their message types when created, so create them before sessions can open.
+        _host.Services.GetRequiredService<PairingService>();
+
         await _host.StartAsync();
 
         MainWindow = _host.Services.GetRequiredService<MainWindow>();

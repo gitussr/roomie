@@ -17,7 +17,7 @@ public sealed record RmpEnvelope(
     JsonElement Payload)
 {
     public static RmpEnvelope Create(string type, Guid senderId, Guid recipientId, DateTimeOffset timestamp, JsonElement payload) =>
-        new(type, Guid.NewGuid(), senderId, recipientId, timestamp, payload);
+        new(type, Guid.CreateVersion7(timestamp), senderId, recipientId, timestamp, payload);
 }
 
 /// <summary>Strict encoding and validation of <see cref="RmpEnvelope"/> as UTF-8 JSON.</summary>
@@ -49,7 +49,7 @@ public static class RmpEnvelopeCodec
         }
 
         using var buffer = new MemoryStream(256);
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = SessionPayloads.WireEncoder }))
         {
             writer.WriteStartObject();
             writer.WriteString("protocol", ProtocolName);
@@ -85,6 +85,12 @@ public static class RmpEnvelopeCodec
         catch (JsonException)
         {
             error = "The message is not valid JSON or is nested too deeply.";
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            // JsonElement only checks a string's encoding when it is read.
+            error = "The message contains invalid text.";
             return false;
         }
     }

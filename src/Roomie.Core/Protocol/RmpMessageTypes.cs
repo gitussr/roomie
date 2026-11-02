@@ -34,17 +34,11 @@ public static class RmpMessageTypes
     public const string Error = "ERROR";
     public const string Goodbye = "GOODBYE";
 
-    private static readonly HashSet<string> PreTrust =
-    [
-        Hello, Heartbeat, HeartbeatAck, Error, Goodbye,
-        PairRequest, PairResponse, PairReveal, PairApprove, PairReject,
-    ];
-
     /// <summary>
     /// Whether a peer that hasn't been paired may send this type. Everything else (chat, groups, files)
     /// requires a trusted session (architecture.md §10, rule 6).
     /// </summary>
-    public static bool IsAllowedBeforeTrust(string type) => PreTrust.Contains(type);
+    public static bool IsAllowedBeforeTrust(string type) => RmpMessagePolicy.Find(type) is { AllowedBeforeTrust: true };
 }
 
 /// <summary>Error codes for <c>ERROR</c> messages (architecture.md §9.1).</summary>
@@ -52,6 +46,7 @@ public static class RmpErrorCodes
 {
     public const string InvalidFrame = "INVALID_FRAME";
     public const string UnsupportedVersion = "UNSUPPORTED_VERSION";
+    public const string UnsupportedMessage = "UNSUPPORTED_MESSAGE";
     public const string PeerNotTrusted = "PEER_NOT_TRUSTED";
     public const string IdentityMismatch = "IDENTITY_MISMATCH";
     public const string PairingRejected = "PAIRING_REJECTED";

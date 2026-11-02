@@ -230,7 +230,11 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
     {
         var bob = await StartAsync("Bob");
         var received = 0;
-        bob.Manager.MessageReceived += (_, _) => Interlocked.Increment(ref received);
+        using var registration = bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], (_, _, _) =>
+        {
+            Interlocked.Increment(ref received);
+            return ValueTask.CompletedTask;
+        });
         await using var raw = await RawPeer.ConnectAsync(CreateStore("Raw"), bob);
 
         await raw.SendAsync(RmpMessageTypes.ChatMessage, SessionPayloads.ToElement(new { body = "hi" }));
@@ -285,6 +289,272 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
         Assert.Equal("The other device disconnected.", bob.Manager.GetInfo(alice.Id).LastError);
     }
 
+    private static System.Text.Json.JsonElement Chat(string content) =>
+        SessionPayloads.ToElement(new ChatMessagePayload("conversation-1", RmpContentTypes.Text, content));
+
+    private static async Task<ErrorPayload> ReadErrorAsync(RawPeer raw)
+    {
+        var error = await raw.ReadUntilAsync(RmpMessageTypes.Error);
+        Assert.True(SessionPayloads.TryReadError(error.Payload, out var payload));
+        return payload;
+    }
+
+    private async Task<(Node Bob, RawPeer Raw)> TrustedRawPeerAsync(IReadOnlyList<string> bobCapabilities, IReadOnlyList<string> rawCapabilities, int maxRejected = 30)
+    {
+        var bob = await StartAsync("Bob", bobCapabilities, maxRejected);
+        var store = CreateStore("Raw");
+        bob.Trust.Trust(new TrustedPeer(store.Identity.DeviceId, "Raw", store.Identity.CertificateFingerprint, DateTimeOffset.UtcNow));
+        return (bob, await RawPeer.ConnectAsync(store, bob, rawCapabilities));
+    }
+
+    [Fact]
+    public async Task Hello_NegotiatesTheCapabilitiesBothSidesOffer()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync(["text", "groups", "only-bob"], ["text", "groups", "only-raw"]);
+        await using var _ = raw;
+
+        await WaitUntil(() => bob.Manager.TryGetSession(raw.Id, out var _));
+        Assert.True(bob.Manager.TryGetSession(raw.Id, out var session));
+
+        Assert.Equal(1, session.ProtocolVersion);
+        Assert.Equal(new HashSet<string> { "text", "groups" }, session.Capabilities);
+        Assert.True(session.Supports(RmpCapabilities.Text));
+        Assert.False(session.Supports(RmpCapabilities.FileTransfer));
+    }
+
+    [Fact]
+    public async Task IncompatibleProtocolVersion_IsTurnedAwayWithAClearError()
+    {
+        var bob = await StartAsync("Bob");
+        await using var raw = await RawPeer.ConnectUnfinishedAsync(CreateStore("Raw"), bob, new HelloPayload(5, 4, "9.0.0", []));
+
+        var payload = await ReadErrorAsync(raw);
+
+        Assert.Equal(RmpErrorCodes.UnsupportedVersion, payload.Code);
+        Assert.False(bob.Manager.TryGetSession(raw.Id, out var _));
+    }
+
+    [Fact]
+    public async Task UnknownType_FromAPairedDevice_IsRefusedAndTheSessionSurvives()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync([], []);
+        await using var _ = raw;
+
+        var messageId = await raw.SendAsync("FEATURE_FROM_THE_FUTURE", SessionPayloads.Empty);
+
+        var error = await raw.ReadUntilAsync(RmpMessageTypes.Error);
+        Assert.True(SessionPayloads.TryReadError(error.Payload, out var payload));
+        Assert.Equal(RmpErrorCodes.UnsupportedMessage, payload.Code);
+        Assert.Equal(messageId, payload.RequestId);
+
+        await raw.SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.Empty);
+        await raw.ReadUntilAsync(RmpMessageTypes.HeartbeatAck);
+        Assert.True(bob.Manager.GetInfo(raw.Id).IsConnected);
+    }
+
+    [Fact]
+    public async Task UnknownType_FromAnUnpairedDevice_LooksLikeAnyOtherRefusal()
+    {
+        var bob = await StartAsync("Bob");
+        await using var raw = await RawPeer.ConnectAsync(CreateStore("Raw"), bob);
+
+        await raw.SendAsync("FEATURE_FROM_THE_FUTURE", SessionPayloads.Empty);
+
+        Assert.Equal(RmpErrorCodes.PeerNotTrusted, (await ReadErrorAsync(raw)).Code);
+    }
+
+    [Fact]
+    public async Task MessageOfACapabilityNotAgreed_IsRefusedBeforeItsHandler()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync(["text"], []);
+        await using var _ = raw;
+        var received = 0;
+        using var registration = bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], (_, _, _) =>
+        {
+            Interlocked.Increment(ref received);
+            return ValueTask.CompletedTask;
+        });
+
+        await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat("hi"));
+
+        Assert.Equal(RmpErrorCodes.UnsupportedMessage, (await ReadErrorAsync(raw)).Code);
+        Assert.Equal(0, received);
+    }
+
+    [Fact]
+    public async Task AgreedMessages_ReachTheirHandlerInOrder()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync(["text"], ["text"]);
+        await using var _ = raw;
+        var received = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        using var registration = bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], async (session, message, cancellationToken) =>
+        {
+            Assert.Equal(raw.Id, session.RemoteDeviceId);
+            Assert.True(ContentPayloads.TryReadChatMessage(message.Payload, out var chat));
+
+            // Later messages must wait for this one, however long it takes.
+            await Task.Delay(chat.Content == "0" ? 100 : 0, cancellationToken);
+            received.Enqueue(chat.Content);
+        });
+
+        for (var i = 0; i < 5; i++)
+        {
+            await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat(i.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
+
+        await WaitUntil(() => received.Count == 5);
+        Assert.Equal(["0", "1", "2", "3", "4"], received);
+    }
+
+    [Fact]
+    public async Task KnownMessageWithoutAHandler_IsRefused()
+    {
+        var (_, raw) = await TrustedRawPeerAsync(["text"], ["text"]);
+        await using var _1 = raw;
+
+        await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat("hi"));
+
+        Assert.Equal(RmpErrorCodes.UnsupportedMessage, (await ReadErrorAsync(raw)).Code);
+    }
+
+    [Fact]
+    public async Task OversizedChatBody_IsRefusedAndTheSessionSurvives()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync(["text"], ["text"]);
+        await using var _ = raw;
+        var received = 0;
+        using var registration = bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], (_, _, _) =>
+        {
+            Interlocked.Increment(ref received);
+            return ValueTask.CompletedTask;
+        });
+
+        await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat(new string('x', RmpContentLimits.MaxTextBodyBytes + 1)));
+        Assert.Equal(RmpErrorCodes.MessageTooLarge, (await ReadErrorAsync(raw)).Code);
+
+        await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat(new string('x', RmpContentLimits.MaxTextBodyBytes)));
+        await WaitUntil(() => received == 1);
+        Assert.True(bob.Manager.GetInfo(raw.Id).IsConnected);
+    }
+
+    [Fact]
+    public async Task HandlerFailure_RevealsNothingAndTheSessionKeepsWorking()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync(["text"], ["text"]);
+        await using var _ = raw;
+        var calls = 0;
+        using var registration = bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], (_, _, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            throw new InvalidDataException(@"C:\secret\path is broken");
+        });
+
+        await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat("hi"));
+
+        var payload = await ReadErrorAsync(raw);
+        Assert.Equal(RmpErrorCodes.InternalError, payload.Code);
+        Assert.DoesNotContain("secret", payload.Message, StringComparison.Ordinal);
+
+        await raw.SendAsync(RmpMessageTypes.ChatMessage, Chat("again"));
+        await raw.ReadUntilAsync(RmpMessageTypes.Error);
+        Assert.Equal(2, calls);
+        Assert.True(bob.Manager.GetInfo(raw.Id).IsConnected);
+    }
+
+    [Fact]
+    public async Task ErrorsAreNeverAnsweredWithErrors()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync([], []);
+        await using var _ = raw;
+
+        await raw.SendAsync(RmpMessageTypes.Error, SessionPayloads.ToElement(new { nonsense = true }));
+        await raw.SendAsync(RmpMessageTypes.Error, SessionPayloads.ToElement(new ErrorPayload(RmpErrorCodes.InternalError, "Oops.")));
+        await raw.SendAsync("FEATURE_FROM_THE_FUTURE", SessionPayloads.Empty);
+
+        // The first ERROR to come back answers the last message, so neither ERROR above got a reply.
+        var payload = await ReadErrorAsync(raw);
+        Assert.Equal(RmpErrorCodes.UnsupportedMessage, payload.Code);
+        Assert.True(bob.Manager.GetInfo(raw.Id).IsConnected);
+    }
+
+    [Fact]
+    public async Task HeartbeatWithAPayload_IsRefused()
+    {
+        var (_, raw) = await TrustedRawPeerAsync([], []);
+        await using var _1 = raw;
+
+        await raw.SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.ToElement(new { extra = 1 }));
+
+        Assert.Equal(RmpErrorCodes.InvalidFrame, (await ReadErrorAsync(raw)).Code);
+    }
+
+    [Fact]
+    public async Task TooManyRefusedMessages_CloseTheSession()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync([], [], maxRejected: 3);
+        await using var _ = raw;
+
+        for (var i = 0; i < 4; i++)
+        {
+            await raw.SendAsync("FEATURE_FROM_THE_FUTURE", SessionPayloads.Empty);
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.Equal(RmpErrorCodes.UnsupportedMessage, (await ReadErrorAsync(raw)).Code);
+        }
+
+        Assert.Equal(RmpErrorCodes.RateLimited, (await ReadErrorAsync(raw)).Code);
+        await WaitUntil(() => !bob.Manager.TryGetSession(raw.Id, out var _));
+    }
+
+    [Fact]
+    public async Task Send_RefusesWhatTheOtherSideWouldHaveToRefuse()
+    {
+        var bob = await StartAsync("Bob", ["text"]);
+        await using var raw = await RawPeer.ConnectAsync(CreateStore("Raw"), bob, ["text"]);
+        await WaitUntil(() => bob.Manager.TryGetSession(raw.Id, out var _));
+        Assert.True(bob.Manager.TryGetSession(raw.Id, out var session));
+
+        // Not paired, so no chat even though "text" was agreed.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SendAsync(RmpMessageTypes.ChatMessage, Chat("hi")));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SendAsync("FEATURE_FROM_THE_FUTURE", SessionPayloads.Empty));
+    }
+
+    [Fact]
+    public async Task Send_ChecksCapabilitiesAndContent()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync(["text"], ["text"]);
+        await using var _ = raw;
+        await WaitUntil(() => bob.Manager.TryGetSession(raw.Id, out var _));
+        Assert.True(bob.Manager.TryGetSession(raw.Id, out var session));
+
+        await session.SendAsync(RmpMessageTypes.ChatMessage, Chat("hi"));
+        await raw.ReadUntilAsync(RmpMessageTypes.ChatMessage);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SendAsync(RmpMessageTypes.ChatMessage, Chat(new string('x', RmpContentLimits.MaxTextBodyBytes + 1))));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.SendAsync(RmpMessageTypes.FileAccept, SessionPayloads.Empty));
+    }
+
+    [Fact]
+    public async Task Dispatcher_RejectsBadRegistrations()
+    {
+        var bob = await StartAsync("Bob");
+        static ValueTask Handler(PeerSession session, RmpEnvelope message, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        static ValueTask Other(PeerSession session, RmpEnvelope message, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+        Assert.Throws<ArgumentException>(() => bob.Manager.Dispatcher.Register(["NOT_A_TYPE"], Handler));
+        Assert.Throws<ArgumentException>(() => bob.Manager.Dispatcher.Register([RmpMessageTypes.Heartbeat], Handler));
+
+        var first = bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], Handler);
+        Assert.Throws<ArgumentException>(() => bob.Manager.Dispatcher.Register([RmpMessageTypes.MessageAck, RmpMessageTypes.ChatMessage], Other));
+
+        // The failed call claimed nothing, and disposing frees the type.
+        bob.Manager.Dispatcher.Register([RmpMessageTypes.MessageAck], Other).Dispose();
+        first.Dispose();
+        bob.Manager.Dispatcher.Register([RmpMessageTypes.ChatMessage], Other).Dispose();
+    }
+
     private DeviceIdentityStore CreateStore(string username)
     {
         var store = new DeviceIdentityStore(Path.Combine(_root, Guid.NewGuid().ToString("N")));
@@ -292,7 +562,7 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
         return store;
     }
 
-    private async Task<Node> StartAsync(string username)
+    private async Task<Node> StartAsync(string username, IReadOnlyList<string>? capabilities = null, int maxRejected = 30)
     {
         var store = CreateStore(username);
         var registry = new PeerRegistry(TimeSpan.FromMinutes(1));
@@ -301,6 +571,8 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
         {
             Port = 0,
             AppVersion = "0.3.0",
+            Capabilities = capabilities ?? [],
+            MaxRejectedMessagesPerMinute = maxRejected,
             HeartbeatInterval = TimeSpan.FromMilliseconds(100),
             MissedHeartbeatThreshold = 3,
             ReconnectDelays = [TimeSpan.FromMilliseconds(50)],
@@ -385,7 +657,15 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
     {
         public Guid Id => store.Identity.DeviceId;
 
-        public static async Task<RawPeer> ConnectAsync(DeviceIdentityStore store, Node target)
+        public static async Task<RawPeer> ConnectAsync(DeviceIdentityStore store, Node target, IReadOnlyList<string>? capabilities = null)
+        {
+            var peer = await ConnectUnfinishedAsync(store, target, new HelloPayload(1, 1, "0.3.0", capabilities ?? []));
+            await peer.ReadUntilAsync(RmpMessageTypes.Hello);
+            return peer;
+        }
+
+        /// <summary>Sends HELLO without waiting for the answer.</summary>
+        public static async Task<RawPeer> ConnectUnfinishedAsync(DeviceIdentityStore store, Node target, HelloPayload hello)
         {
             var client = new TcpClient();
             await client.ConnectAsync(IPAddress.Loopback, target.Port);
@@ -393,15 +673,15 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
             var (ssl, _) = await TlsHandshake.AuthenticateAsClientAsync(client.GetStream(), credentials, target.Id, TimeProvider.System, CancellationToken.None);
 
             var peer = new RawPeer(store, ssl, target.Id);
-            await peer.SendAsync(RmpMessageTypes.Hello, SessionPayloads.ToElement(new HelloPayload(1, 1, "0.3.0", [])));
-            await peer.ReadUntilAsync(RmpMessageTypes.Hello);
+            await peer.SendAsync(RmpMessageTypes.Hello, SessionPayloads.ToElement(hello));
             return peer;
         }
 
-        public async Task SendAsync(string type, System.Text.Json.JsonElement payload, Guid? senderId = null)
+        public async Task<Guid> SendAsync(string type, System.Text.Json.JsonElement payload, Guid? senderId = null)
         {
             var envelope = RmpEnvelope.Create(type, senderId ?? Id, remoteId, DateTimeOffset.UtcNow, payload);
             await WriteRawAsync(RmpFraming.Encode(RmpFrameType.Control, RmpEnvelopeCodec.Encode(envelope)));
+            return envelope.MessageId;
         }
 
         public async Task WriteRawAsync(byte[] data)

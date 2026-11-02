@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Roomie.Core.Configuration;
@@ -25,8 +26,16 @@ public static class SessionPayloads
     public const int MaxErrorMessageLength = 512;
     public const int MaxReasonLength = 40;
 
+    /// <summary>
+    /// The default encoder writes every non-ASCII character and common punctuation as <c>\uXXXX</c> for safety
+    /// inside HTML. RMP is never embedded in a page, and that escaping could push a 16 KiB text body past the
+    /// 64 KiB control frame limit.
+    /// </summary>
+    internal static JavaScriptEncoder WireEncoder { get; } = JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+
     private static readonly JsonSerializerOptions Options = new()
     {
+        Encoder = WireEncoder,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         RespectNullableAnnotations = true,
@@ -96,8 +105,9 @@ public static class SessionPayloads
         {
             return payload.Deserialize<T>(Options);
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
+            // InvalidOperationException: a string with invalid encoding, only detected when it is read.
             return null;
         }
     }

@@ -87,6 +87,7 @@ public sealed partial class PairingService : IDisposable
     private readonly PairingOptions _options;
     private readonly TimeProvider _time;
     private readonly ILogger<PairingService> _logger;
+    private readonly IDisposable _registration;
 
     private readonly Lock _gate = new();
     private readonly Dictionary<Guid, List<DateTimeOffset>> _failures = [];
@@ -112,7 +113,9 @@ public sealed partial class PairingService : IDisposable
         _time = time;
         _logger = logger;
 
-        _connections.MessageReceived += OnMessageReceived;
+        _registration = _connections.Dispatcher.Register(
+            [RmpMessageTypes.PairRequest, RmpMessageTypes.PairResponse, RmpMessageTypes.PairReveal, RmpMessageTypes.PairApprove, RmpMessageTypes.PairReject],
+            HandleMessageAsync);
     }
 
     /// <summary>Raised on a background thread whenever <see cref="Current"/> changes.</summary>
@@ -271,39 +274,40 @@ public sealed partial class PairingService : IDisposable
 
     public void Dispose()
     {
-        _connections.MessageReceived -= OnMessageReceived;
+        _registration.Dispose();
         lock (_gate)
         {
             _current?.DisposeKeys();
         }
     }
 
-    private void OnMessageReceived(object? sender, PeerMessageEventArgs e)
+    private ValueTask HandleMessageAsync(PeerSession session, RmpEnvelope message, CancellationToken cancellationToken)
     {
-        var payload = e.Message.Payload;
-        switch (e.Message.Type)
+        var payload = message.Payload;
+        switch (message.Type)
         {
             case RmpMessageTypes.PairRequest when PairingMessages.TryReadRequest(payload, out var request):
-                OnRequest(e.Session, request);
+                OnRequest(session, request);
                 break;
             case RmpMessageTypes.PairResponse when PairingMessages.TryReadKey(payload, out var response):
-                OnResponse(e.Session, response);
+                OnResponse(session, response);
                 break;
             case RmpMessageTypes.PairReveal when PairingMessages.TryReadKey(payload, out var reveal):
-                OnReveal(e.Session, reveal);
+                OnReveal(session, reveal);
                 break;
             case RmpMessageTypes.PairApprove when PairingMessages.TryReadApprove(payload, out var approve):
-                OnApprove(e.Session, approve);
+                OnApprove(session, approve);
                 break;
             case RmpMessageTypes.PairReject when PairingMessages.TryReadReject(payload, out var reject):
-                OnReject(e.Session, reject);
+                OnReject(session, reject);
                 break;
-            case RmpMessageTypes.PairRequest or RmpMessageTypes.PairResponse or RmpMessageTypes.PairReveal
-                or RmpMessageTypes.PairApprove or RmpMessageTypes.PairReject:
-                LogMalformed(_logger, e.Message.Type, e.Session.RemoteDeviceId);
-                FailIfCurrent(e.Session, null, "The other device sent an invalid pairing message.");
+            default:
+                LogMalformed(_logger, message.Type, session.RemoteDeviceId);
+                FailIfCurrent(session, null, "The other device sent an invalid pairing message.");
                 break;
         }
+
+        return ValueTask.CompletedTask;
     }
 
     private void OnRequest(PeerSession session, PairRequestPayload request)

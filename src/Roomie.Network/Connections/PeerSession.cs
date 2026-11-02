@@ -30,8 +30,10 @@ public enum SessionCloseKind
 public sealed record SessionCloseInfo(SessionCloseKind Kind, string Description, string? Reason = null);
 
 /// <summary>
-/// One authenticated TLS session with a peer, after the HELLO exchange. Handles heartbeats, <c>GOODBYE</c>
-/// and the pre-trust message gate; other messages are raised through <see cref="MessageReceived"/>.
+/// One authenticated TLS session with a peer, after the HELLO exchange. Handles heartbeats and <c>GOODBYE</c>,
+/// applies <see cref="RmpMessagePolicy"/> to everything else, and hands what passes to the dispatcher.
+/// A frame that can't be parsed, or that claims the wrong sender, closes the session. A well-formed message
+/// that is refused only gets an <c>ERROR</c>, unless the peer keeps sending them.
 /// </summary>
 public sealed partial class PeerSession : IAsyncDisposable
 {
@@ -42,6 +44,9 @@ public sealed partial class PeerSession : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly TimeSpan _heartbeatInterval;
     private readonly int _missedHeartbeats;
+    private readonly RmpDispatcher _dispatcher;
+    private readonly RmpNegotiatedSession _negotiated;
+    private readonly SlidingWindowRateLimiter _rejections;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly TaskCompletionSource<SessionCloseInfo> _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -57,16 +62,20 @@ public sealed partial class PeerSession : IAsyncDisposable
         SessionDirection direction,
         IPEndPoint remoteEndPoint,
         HelloPayload remoteHello,
-        TimeSpan heartbeatInterval,
-        int missedHeartbeats,
+        RmpNegotiatedSession negotiated,
+        RmpDispatcher dispatcher,
+        ConnectionOptions options,
         TimeProvider time,
         ILogger logger)
     {
         _stream = stream;
         _time = time;
         _logger = logger;
-        _heartbeatInterval = heartbeatInterval;
-        _missedHeartbeats = missedHeartbeats;
+        _heartbeatInterval = options.HeartbeatInterval;
+        _missedHeartbeats = options.MissedHeartbeatThreshold;
+        _dispatcher = dispatcher;
+        _negotiated = negotiated;
+        _rejections = new SlidingWindowRateLimiter(time, options.MaxRejectedMessagesPerMinute, TimeSpan.FromMinutes(1), maxTracked: 1);
 
         LocalDeviceId = localDeviceId;
         RemoteDeviceId = peer.DeviceId;
@@ -80,9 +89,6 @@ public sealed partial class PeerSession : IAsyncDisposable
         EstablishedAt = time.GetUtcNow();
         _lastReceivedTicks = EstablishedAt.UtcTicks;
     }
-
-    /// <summary>Raised on a background thread for every message the session doesn't handle itself.</summary>
-    public event EventHandler<RmpEnvelope>? MessageReceived;
 
     public Guid SessionId { get; } = Guid.NewGuid();
 
@@ -107,6 +113,12 @@ public sealed partial class PeerSession : IAsyncDisposable
 
     public HelloPayload RemoteHello { get; }
 
+    /// <summary>The protocol version both sides agreed on.</summary>
+    public int ProtocolVersion => _negotiated.ProtocolVersion;
+
+    /// <summary>The capabilities both sides advertised. Check with <see cref="Supports"/> before using a feature.</summary>
+    public IReadOnlySet<string> Capabilities => _negotiated.Capabilities;
+
     public string Security { get; }
 
     public DateTimeOffset EstablishedAt { get; }
@@ -118,6 +130,9 @@ public sealed partial class PeerSession : IAsyncDisposable
 
     public bool IsClosed => Volatile.Read(ref _closing) != 0;
 
+    /// <summary>Whether both sides agreed on this optional feature for this session.</summary>
+    public bool Supports(string capability) => _negotiated.Capabilities.Contains(capability);
+
     internal void MarkTrusted() => _isTrusted = true;
 
     internal void Start()
@@ -126,9 +141,18 @@ public sealed partial class PeerSession : IAsyncDisposable
         _ = Task.Run(HeartbeatLoopAsync);
     }
 
-    /// <exception cref="InvalidOperationException">The session is closed.</exception>
+    /// <summary>
+    /// Sends a message, applying the same rules a receiver would, so this device never sends what the other
+    /// side would have to refuse.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The session is closed, or the message isn't allowed on it.</exception>
     public async Task SendAsync(string type, JsonElement payload, CancellationToken cancellationToken = default)
     {
+        if (RmpMessagePolicy.Check(type, payload, IsTrusted, Capabilities) is { } refused)
+        {
+            throw new InvalidOperationException($"{type} can't be sent on this session: {refused.Message}");
+        }
+
         var envelope = RmpEnvelope.Create(type, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), payload);
         await WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
     }
@@ -146,9 +170,9 @@ public sealed partial class PeerSession : IAsyncDisposable
         _lifetime.Dispose();
     }
 
-    private Task FailAsync(string code, string message) =>
+    private Task FailAsync(string code, string message, Guid? requestId = null) =>
         ShutdownAsync(new SessionCloseInfo(SessionCloseKind.ProtocolError, message, code),
-            (RmpMessageTypes.Error, SessionPayloads.ToElement(new ErrorPayload(code, message))));
+            (RmpMessageTypes.Error, SessionPayloads.ToElement(new ErrorPayload(code, message, requestId))));
 
     private async Task ReadLoopAsync()
     {
@@ -182,7 +206,7 @@ public sealed partial class PeerSession : IAsyncDisposable
                 // The authenticated TLS session identifies the sender; the envelope must agree with it.
                 if (envelope.SenderId != RemoteDeviceId || envelope.RecipientId != LocalDeviceId)
                 {
-                    await FailAsync(RmpErrorCodes.InvalidFrame, "The message's sender or recipient doesn't match this session.").ConfigureAwait(false);
+                    await FailAsync(RmpErrorCodes.InvalidFrame, "The message's sender or recipient doesn't match this session.", envelope.MessageId).ConfigureAwait(false);
                     return;
                 }
 
@@ -210,15 +234,8 @@ public sealed partial class PeerSession : IAsyncDisposable
     {
         switch (envelope.Type)
         {
-            case RmpMessageTypes.Heartbeat:
-                await WriteAsync(RmpEnvelope.Create(RmpMessageTypes.HeartbeatAck, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), SessionPayloads.Empty), cancellationToken).ConfigureAwait(false);
-                return true;
-
-            case RmpMessageTypes.HeartbeatAck:
-                return true;
-
             case RmpMessageTypes.Hello:
-                await FailAsync(RmpErrorCodes.InvalidFrame, "HELLO was sent twice.").ConfigureAwait(false);
+                await FailAsync(RmpErrorCodes.InvalidFrame, "HELLO was sent twice.", envelope.MessageId).ConfigureAwait(false);
                 return false;
 
             case RmpMessageTypes.Goodbye:
@@ -227,23 +244,57 @@ public sealed partial class PeerSession : IAsyncDisposable
                 return false;
 
             case RmpMessageTypes.Error:
-                if (SessionPayloads.TryReadError(envelope.Payload, out var reported))
-                {
-                    LogPeerReportedError(_logger, RemoteDeviceId, reported.Code, reported.Message);
-                }
-
-                break;
+                await HandleErrorAsync(envelope, cancellationToken).ConfigureAwait(false);
+                return true;
         }
 
-        if (!IsTrusted && !RmpMessageTypes.IsAllowedBeforeTrust(envelope.Type))
+        if (RmpMessagePolicy.Check(envelope.Type, envelope.Payload, IsTrusted, Capabilities) is { } refused)
         {
-            LogUntrustedMessageRefused(_logger, envelope.Type, RemoteDeviceId);
-            var refusal = new ErrorPayload(RmpErrorCodes.PeerNotTrusted, "This device has not been paired.", envelope.MessageId);
-            await WriteAsync(RmpEnvelope.Create(RmpMessageTypes.Error, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), SessionPayloads.ToElement(refusal)), cancellationToken).ConfigureAwait(false);
-            return true;
+            return await RejectAsync(envelope, refused, cancellationToken).ConfigureAwait(false);
         }
 
-        MessageReceived?.Invoke(this, envelope);
+        switch (envelope.Type)
+        {
+            case RmpMessageTypes.Heartbeat:
+                await WriteAsync(RmpEnvelope.Create(RmpMessageTypes.HeartbeatAck, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), SessionPayloads.Empty), cancellationToken).ConfigureAwait(false);
+                return true;
+
+            case RmpMessageTypes.HeartbeatAck:
+                return true;
+        }
+
+        return await _dispatcher.DispatchAsync(this, envelope, cancellationToken).ConfigureAwait(false) is { } failed
+            ? await RejectAsync(envelope, failed, cancellationToken).ConfigureAwait(false)
+            : true;
+    }
+
+    /// <summary>An <c>ERROR</c> is never answered with another one, whatever is wrong with it: two devices could do that forever.</summary>
+    private async Task HandleErrorAsync(RmpEnvelope envelope, CancellationToken cancellationToken)
+    {
+        if (!SessionPayloads.TryReadError(envelope.Payload, out var reported))
+        {
+            LogMalformedError(_logger, RemoteDeviceId);
+            return;
+        }
+
+        LogPeerReportedError(_logger, RemoteDeviceId, reported.Code, reported.Message);
+        await _dispatcher.DispatchErrorAsync(this, envelope, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Refuses one message and keeps the session, unless the peer has used up its allowance of refusals.</summary>
+    /// <returns>False when the session has ended.</returns>
+    private async Task<bool> RejectAsync(RmpEnvelope envelope, RmpRejection rejection, CancellationToken cancellationToken)
+    {
+        LogMessageRefused(_logger, envelope.Type, RemoteDeviceId, rejection.Code);
+
+        if (!_rejections.TryAcquire(RemoteEndPoint.Address))
+        {
+            await FailAsync(RmpErrorCodes.RateLimited, "Too many refused messages.", envelope.MessageId).ConfigureAwait(false);
+            return false;
+        }
+
+        var error = new ErrorPayload(rejection.Code, rejection.Message, envelope.MessageId);
+        await WriteAsync(RmpEnvelope.Create(RmpMessageTypes.Error, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), SessionPayloads.ToElement(error)), cancellationToken).ConfigureAwait(false);
         return true;
     }
 
@@ -347,6 +398,9 @@ public sealed partial class PeerSession : IAsyncDisposable
     [LoggerMessage(Level = LogLevel.Warning, Message = "{DeviceId} reported {Code}: {Message}")]
     private static partial void LogPeerReportedError(ILogger logger, Guid deviceId, string code, string message);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Refused {Type} from unpaired device {DeviceId}")]
-    private static partial void LogUntrustedMessageRefused(ILogger logger, string type, Guid deviceId);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{DeviceId} sent a malformed ERROR")]
+    private static partial void LogMalformedError(ILogger logger, Guid deviceId);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Refused {Type} from {DeviceId}: {Code}")]
+    private static partial void LogMessageRefused(ILogger logger, string type, Guid deviceId, string code);
 }

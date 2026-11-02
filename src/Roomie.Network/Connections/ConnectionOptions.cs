@@ -47,6 +47,9 @@ public sealed class ConnectionOptions
 
     public int MaxInboundPerAddressPerMinute { get; init; } = 20;
 
+    /// <summary>A session is closed when more messages than this are refused within a minute.</summary>
+    public int MaxRejectedMessagesPerMinute { get; init; } = 30;
+
     public TimeSpan MaintenanceInterval { get; init; } = TimeSpan.FromSeconds(1);
 
     public TimeSpan InterfaceRefreshInterval { get; init; } = TimeSpan.FromSeconds(10);

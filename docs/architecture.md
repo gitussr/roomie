@@ -616,6 +616,36 @@ Define message types centrally rather than scattering string literals throughout
 
 These are application-level messages. Discovery packets remain separate, unauthenticated UDP datagrams.
 
+## 5.4 Accepting a message (as implemented)
+
+A control frame goes through these checks in order. The first failure decides the outcome.
+
+| # | Check | On failure | Session |
+| - | ----- | ---------- | ------- |
+| 1 | Frame length and type, JSON, envelope schema | `INVALID_FRAME` or `MESSAGE_TOO_LARGE` | Closed |
+| 2 | `senderId` and `recipientId` match the TLS session | `INVALID_FRAME` | Closed |
+| 3 | The peer is trusted, or the type is allowed before trust | `PEER_NOT_TRUSTED` | Kept |
+| 4 | The type is known | `UNSUPPORTED_MESSAGE` | Kept |
+| 5 | The type's capability was negotiated | `UNSUPPORTED_MESSAGE` | Kept |
+| 6 | The payload fits the type's size limit | `MESSAGE_TOO_LARGE` | Kept |
+| 7 | The payload matches the type's schema and content limits, where one is defined yet | `MESSAGE_TOO_LARGE` or `INVALID_FRAME` | Kept |
+| 8 | A service owns the type, and handles it without failing | `UNSUPPORTED_MESSAGE` or `INTERNAL_ERROR` | Kept |
+
+Rules:
+
+- **Why some failures keep the session.** After check 2 the frame was complete and came from the authenticated peer, so the stream is still in step and only that message is refused. The `ERROR` carries its `messageId` as `requestId`.
+- **Refusals are limited.** More than 30 refused messages in a minute close the session with `RATE_LIMITED`.
+- **Unknown types are refused, not fatal.** An unknown type is how a newer peer's optional feature looks to an older one (§9). A change an older peer can't safely ignore needs a new protocol version.
+- **Unpaired peers learn nothing.** Check 3 comes before check 4, so an unpaired peer gets the same answer for every type it may not send, known or not.
+- **`ERROR` is never answered with `ERROR`,** even when malformed, so two devices can't loop. `HELLO` after the handshake closes the session, and `GOODBYE` always does.
+- **Senders apply checks 3 to 7 too,** so a device never sends what the other side would have to refuse.
+- **Handlers run one at a time, in order, on the session's read loop.** While one runs, the session reads nothing else, heartbeats included, so a handler may do brief work like a database write but must never wait for a user. Each type has one owning service.
+- **Handler failures stay local.** The peer gets a generic `INTERNAL_ERROR`, the details go only to the log, and the session continues.
+
+Text is sent with minimal JSON escaping, because the default `\uXXXX` escaping could push a valid 16 KiB body past the 64 KiB control frame limit. The body limit counts decoded UTF-8 bytes. Chat text may contain only tab, CR and LF as control characters, which also guarantees that a full-size body fits one frame.
+
+Only `CHAT_MESSAGE` and `FILE_OFFER` have content schemas so far, because they are the only payloads this specification defines. The later phases that define the other payloads add theirs. Identifiers in chat payloads are 1–64 characters of letters, digits, `-` and `_`. `FILE_OFFER` refuses filenames containing path separators, `:` or control characters, but the file transfer service must still build the final path itself (§10, rule 5).
+
 # 6. Text messaging protocol
 
 Every chat message must have a globally unique ID.
@@ -879,6 +909,8 @@ Rules:
 
 For V1, both peers should support the same core protocol version.
 
+As implemented, each session uses the highest version both sides support and the intersection of the capabilities both advertised. A capability only one side knows is dropped, not an error. If the version ranges don't overlap, the connection is refused with `UNSUPPORTED_VERSION`. Capabilities are advertised only once the service behind them exists: none yet, `text` from Phase 6.
+
 ## 9.1 Error protocol
 
 Standardize errors so the application can explain failures to users.
@@ -898,6 +930,7 @@ Suggested error codes:
 | --------------------- | ------------------------------- |
 | `INVALID_FRAME`       | Malformed network frame         |
 | `UNSUPPORTED_VERSION` | Incompatible protocol           |
+| `UNSUPPORTED_MESSAGE` | Unknown message type, or its capability wasn't negotiated |
 | `PEER_NOT_TRUSTED`    | Device not paired               |
 | `IDENTITY_MISMATCH`   | Certificate fingerprint changed |
 | `PAIRING_REJECTED`    | User rejected pairing           |
