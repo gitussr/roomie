@@ -313,9 +313,142 @@ public sealed class SqliteMessageStoreTests : IDisposable
         store.TryAddIncoming(Incoming());
         store.Dispose();
 
-        Assert.Equal(1, ReadUserVersion());
+        Assert.Equal(2, ReadUserVersion());
         Assert.Single(Open().GetConversation(Peer));
-        Assert.Equal(1, ReadUserVersion());
+        Assert.Equal(2, ReadUserVersion());
+    }
+
+    /// <summary>The exact schema 0.7.0 shipped, with a message in each state: real databases look like this.</summary>
+    [Fact]
+    public void DatabaseFromVersion7_IsUpgraded_AndKeepsEverything()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        var waiting = Guid.NewGuid();
+        var read = Guid.NewGuid();
+        using (var connection = new SqliteConnection($"Data Source={DatabasePath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                CREATE TABLE messages (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL,
+                    peer_id TEXT NOT NULL,
+                    direction INTEGER NOT NULL CHECK (direction IN (0, 1)),
+                    content TEXT NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 4),
+                    failure TEXT,
+                    read_receipt_pending INTEGER NOT NULL DEFAULT 0 CHECK (read_receipt_pending IN (0, 1)),
+                    UNIQUE (peer_id, direction, message_id)
+                ) STRICT;
+                CREATE INDEX messages_by_time ON messages (peer_id, timestamp_ms, seq);
+                CREATE INDEX messages_undelivered ON messages (peer_id, timestamp_ms, seq) WHERE direction = 0 AND state < 2;
+                CREATE INDEX messages_unread ON messages (peer_id) WHERE direction = 1 AND state < 4;
+                CREATE INDEX messages_receipts_owed ON messages (peer_id, seq) WHERE read_receipt_pending = 1;
+                INSERT INTO messages (message_id, peer_id, direction, content, timestamp_ms, state) VALUES ('{waiting:D}', '{Peer:D}', 0, 'waiting', 1000, 0);
+                INSERT INTO messages (message_id, peer_id, direction, content, timestamp_ms, state, read_receipt_pending) VALUES ('{read:D}', '{Peer:D}', 1, 'read', 2000, 4, 1);
+                PRAGMA user_version = 1;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        var store = Open();
+
+        Assert.Equal(["waiting", "read"], store.GetConversation(Peer).Select(m => m.Content));
+        Assert.Equal(waiting, Assert.Single(store.GetUndelivered(Peer)).MessageId);
+        Assert.Equal([read], store.GetPendingReadReceipts(Peer));
+        Assert.Null(store.GetConversation(Peer)[0].GroupId);
+        Assert.False(store.TryAddIncoming(Incoming(read)));
+        store.Dispose();
+        Assert.Equal(2, ReadUserVersion());
+    }
+
+    private const string GroupA = "group-a";
+
+    private static StoredMessage OutgoingToGroup(int seconds = 0) => new(
+        Guid.NewGuid(), Guid.Empty, MessageDirection.Outgoing, "to all", Start.AddSeconds(seconds), DeliveryState.Delivered, GroupId: GroupA, MembershipVersion: 1);
+
+    [Fact]
+    public void GroupCopies_AreTrackedForEachRecipient()
+    {
+        var store = Open();
+        var other = Guid.NewGuid();
+        var message = OutgoingToGroup();
+        store.AddOutgoingGroup(message, [Peer, other]);
+
+        var copy = Assert.Single(store.GetUndelivered(Peer));
+        Assert.Equal(message.MessageId, copy.MessageId);
+        Assert.Equal(Peer, copy.PeerId);
+        Assert.Equal(GroupA, copy.GroupId);
+        Assert.Equal(1, copy.MembershipVersion);
+
+        Assert.True(store.Advance(Peer, message.MessageId, DeliveryState.Delivered));
+        Assert.Empty(store.GetUndelivered(Peer));
+        Assert.Single(store.GetUndelivered(other));
+
+        var recipients = Assert.Single(store.GetGroupConversation(GroupA)).Recipients!.ToDictionary(r => r.DeviceId);
+        Assert.Equal(DeliveryState.Delivered, recipients[Peer].State);
+        Assert.Equal(DeliveryState.Pending, recipients[other].State);
+    }
+
+    [Fact]
+    public void GroupCopy_CanOnlyBeConfirmedByItsOwnRecipient_AndOnlyForward()
+    {
+        var store = Open();
+        var message = OutgoingToGroup();
+        store.AddOutgoingGroup(message, [Peer]);
+
+        Assert.False(store.Advance(Guid.NewGuid(), message.MessageId, DeliveryState.Delivered));
+        Assert.True(store.Advance(Peer, message.MessageId, DeliveryState.Read));
+        Assert.False(store.Advance(Peer, message.MessageId, DeliveryState.Delivered));
+    }
+
+    [Fact]
+    public void GroupMessages_StayOutOfOneToOneConversations()
+    {
+        var store = Open();
+        var fromGroup = Incoming() with { GroupId = GroupA, MembershipVersion = 1 };
+        store.TryAddIncoming(fromGroup);
+        store.TryAddIncoming(Incoming(seconds: 1, text: "direct"));
+
+        Assert.Equal("direct", Assert.Single(store.GetConversation(Peer)).Content);
+        Assert.Equal(fromGroup.MessageId, Assert.Single(store.GetGroupConversation(GroupA)).MessageId);
+        Assert.Equal(1, Assert.Single(store.GetActiveConversations()).UnreadCount);
+        Assert.Equal(1, store.GetGroupUnreadCounts()[GroupA]);
+
+        store.MarkIncomingRead(Peer);
+        Assert.Equal(1, store.GetGroupUnreadCounts()[GroupA]);
+
+        Assert.Equal([Peer], store.MarkGroupRead(GroupA));
+        Assert.Empty(store.GetGroupUnreadCounts());
+        Assert.Contains(fromGroup.MessageId, store.GetPendingReadReceipts(Peer));
+        Assert.Empty(store.MarkGroupRead(GroupA));
+    }
+
+    [Fact]
+    public void WaitingGroupCopy_CountsAsWorkForThatDevice_AndSurvivesARestart()
+    {
+        var store = Open();
+        var message = OutgoingToGroup();
+        store.AddOutgoingGroup(message, [Peer]);
+
+        store = Reopen(store);
+
+        Assert.True(Assert.Single(store.GetActiveConversations()).HasWaitingWork);
+        Assert.Equal(Peer, store.GetActiveConversations()[0].PeerId);
+        Assert.Equal(message.MessageId, Assert.Single(store.GetUndelivered(Peer)).MessageId);
+    }
+
+    [Fact]
+    public void GroupDuplicate_FromTheSameSender_IsNotStoredTwice()
+    {
+        var store = Open();
+        var message = Incoming() with { GroupId = GroupA, MembershipVersion = 1 };
+
+        Assert.True(store.TryAddIncoming(message));
+        Assert.False(store.TryAddIncoming(message));
+        Assert.True(store.TryAddIncoming(message with { PeerId = Guid.NewGuid() }));
     }
 
     [Fact]

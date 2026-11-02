@@ -7,6 +7,7 @@ using Roomie.Core.Messaging;
 using Roomie.Core.Protocol;
 using Roomie.Core.Trust;
 using Roomie.Network.Connections;
+using Roomie.Network.Groups;
 
 namespace Roomie.Network.Messaging;
 
@@ -36,6 +37,7 @@ public sealed record MessageSendResult(StoredMessage? Message, string? Error);
 public sealed partial class MessagingService : BackgroundService
 {
     private readonly ConnectionManager _connections;
+    private readonly GroupService _groups;
     private readonly IMessageStore _store;
     private readonly ITrustStore _trust;
     private readonly ILocalIdentityProvider _identity;
@@ -46,7 +48,7 @@ public sealed partial class MessagingService : BackgroundService
     private readonly Channel<Guid> _work = Channel.CreateUnbounded<Guid>(new UnboundedChannelOptions { SingleReader = true });
 
     private readonly Lock _gate = new();
-    private readonly Dictionary<Guid, Attempt> _attempts = [];
+    private readonly Dictionary<(Guid MessageId, Guid PeerId), Attempt> _attempts = [];
     private readonly Dictionary<Guid, Hold> _holds = [];
 
     public MessagingService(
@@ -54,11 +56,13 @@ public sealed partial class MessagingService : BackgroundService
         IMessageStore store,
         ITrustStore trust,
         ILocalIdentityProvider identity,
+        GroupService groups,
         MessagingOptions options,
         TimeProvider time,
         ILogger<MessagingService> logger)
     {
         _connections = connections;
+        _groups = groups;
         _store = store;
         _trust = trust;
         _identity = identity;
@@ -71,6 +75,7 @@ public sealed partial class MessagingService : BackgroundService
             HandleMessageAsync);
         connections.SessionOpened += OnSessionOpened;
         trust.Changed += OnTrustChanged;
+        groups.WorkQueued += OnGroupWork;
     }
 
     /// <summary>Raised on a background thread when a conversation changes. The argument is the device.</summary>
@@ -110,6 +115,71 @@ public sealed partial class MessagingService : BackgroundService
         RaiseChanged(peerId);
         Enqueue(peerId);
         return new MessageSendResult(message, null);
+    }
+
+    /// <summary>
+    /// Saves a message to a group and queues one copy per member of the current membership. Members this device
+    /// isn't paired with get theirs if it pairs with them later: membership never creates trust.
+    /// </summary>
+    public MessageSendResult SendGroupText(string groupId, string text)
+    {
+        StoredMessage message;
+        var recipients = new List<Guid>();
+        try
+        {
+            if (_groups.GetGroup(groupId) is not { IsMember: true } group)
+            {
+                return new MessageSendResult(null, "You're no longer in this group.");
+            }
+
+            var content = ContentPayloads.NormalizeText(text);
+            var check = ContentPayloads.CheckChatMessage(ToGroupPayload(groupId, group.Version, content));
+            if (check != RmpPayloadCheck.Valid)
+            {
+                return new MessageSendResult(null, check == RmpPayloadCheck.TooLarge
+                    ? $"This message is too long. The limit is {RmpContentLimits.MaxTextBodyBytes / 1024} KB."
+                    : "Type a message first.");
+            }
+
+            var now = DateTimeOffset.FromUnixTimeMilliseconds(_time.GetUtcNow().ToUnixTimeMilliseconds());
+            message = new StoredMessage(Guid.CreateVersion7(now), Guid.Empty, MessageDirection.Outgoing, content, now, DeliveryState.Delivered, GroupId: groupId, MembershipVersion: group.Version);
+            recipients.AddRange(group.State.Members.Select(m => m.DeviceId).Where(id => id != _identity.Identity.DeviceId));
+            _store.AddOutgoingGroup(message, recipients);
+        }
+        catch (MessageStoreException)
+        {
+            return new MessageSendResult(null, "Roomie couldn't save this message, so it wasn't sent. Check that the disk has free space, then try again.");
+        }
+
+        RaiseChanged(Guid.Empty);
+        foreach (var recipient in recipients)
+        {
+            Enqueue(recipient);
+        }
+
+        return new MessageSendResult(message, null);
+    }
+
+    /// <summary>The user is looking at this group: its messages count as read, and each sender is told.</summary>
+    public void MarkGroupRead(string groupId)
+    {
+        try
+        {
+            var senders = _store.MarkGroupRead(groupId);
+            if (senders.Count > 0)
+            {
+                RaiseChanged(Guid.Empty);
+            }
+
+            foreach (var sender in senders)
+            {
+                Enqueue(sender);
+            }
+        }
+        catch (MessageStoreException)
+        {
+            // Still unread, so the next update tries again.
+        }
     }
 
     /// <summary>The user is looking at this conversation: its messages count as read, and the sender is told.</summary>
@@ -172,6 +242,7 @@ public sealed partial class MessagingService : BackgroundService
         _registration.Dispose();
         _connections.SessionOpened -= OnSessionOpened;
         _trust.Changed -= OnTrustChanged;
+        _groups.WorkQueued -= OnGroupWork;
         base.Dispose();
     }
 
@@ -191,6 +262,8 @@ public sealed partial class MessagingService : BackgroundService
     }
 
     private void OnSessionOpened(object? sender, PeerSession session) => Enqueue(session.RemoteDeviceId);
+
+    private void OnGroupWork(object? sender, Guid peerId) => Enqueue(peerId);
 
     private void OnTrustChanged(object? sender, EventArgs e)
     {
@@ -229,6 +302,13 @@ public sealed partial class MessagingService : BackgroundService
 
         try
         {
+            // Membership first, so a device knows who is in a group before it gets a message from that group.
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeout.CancelAfter(_options.WriteTimeout);
+                await _groups.FlushAsync(session, timeout.Token).ConfigureAwait(false);
+            }
+
             await SendWaitingMessagesAsync(session, cancellationToken).ConfigureAwait(false);
             await SendReadReceiptsAsync(session, cancellationToken).ConfigureAwait(false);
         }
@@ -252,7 +332,10 @@ public sealed partial class MessagingService : BackgroundService
     {
         var peerId = session.RemoteDeviceId;
         var now = _time.GetUtcNow();
-        var waiting = _store.GetUndelivered(peerId);
+
+        // A device without groups would refuse a group copy, and that refusal would hold its one-to-one messages too.
+        var supportsGroups = session.Supports(RmpCapabilities.Groups);
+        var waiting = _store.GetUndelivered(peerId).Where(m => m.GroupId is null || supportsGroups).ToList();
         var due = new List<StoredMessage>();
         lock (_gate)
         {
@@ -261,7 +344,7 @@ public sealed partial class MessagingService : BackgroundService
                 return;
             }
 
-            var inFlight = waiting.Count(m => _attempts.TryGetValue(m.MessageId, out var attempt)
+            var inFlight = waiting.Count(m => _attempts.TryGetValue((m.MessageId, peerId), out var attempt)
                 && attempt.SessionId == session.SessionId && now - attempt.At < _options.AckTimeout);
 
             foreach (var message in waiting)
@@ -271,7 +354,7 @@ public sealed partial class MessagingService : BackgroundService
                     break;
                 }
 
-                var waitingForAck = _attempts.TryGetValue(message.MessageId, out var attempt)
+                var waitingForAck = _attempts.TryGetValue((message.MessageId, peerId), out var attempt)
                     && attempt.SessionId == session.SessionId && now - attempt.At < _options.AckTimeout;
                 if (!waitingForAck)
                 {
@@ -284,12 +367,15 @@ public sealed partial class MessagingService : BackgroundService
         {
             lock (_gate)
             {
-                _attempts[message.MessageId] = new Attempt(session.SessionId, _time.GetUtcNow());
+                _attempts[(message.MessageId, peerId)] = new Attempt(session.SessionId, _time.GetUtcNow());
             }
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(_options.WriteTimeout);
-            await session.SendAsync(RmpMessageTypes.ChatMessage, ToPayload(peerId, message.Content), message.MessageId, message.Timestamp, timeout.Token).ConfigureAwait(false);
+            var payload = message.GroupId is { } groupId
+                ? ToGroupPayload(groupId, message.MembershipVersion ?? 1, message.Content)
+                : ToPayload(peerId, message.Content);
+            await session.SendAsync(RmpMessageTypes.ChatMessage, payload, message.MessageId, message.Timestamp, timeout.Token).ConfigureAwait(false);
 
             if (_store.Advance(peerId, message.MessageId, DeliveryState.Sent))
             {
@@ -340,18 +426,24 @@ public sealed partial class MessagingService : BackgroundService
             throw new RmpProtocolException(RmpErrorCodes.InvalidFrame, "The message content is not valid.");
         }
 
-        if (chat.GroupId is not null)
+        var isGroup = chat.GroupId is not null;
+        if (isGroup && !session.Supports(RmpCapabilities.Groups))
         {
-            throw new RmpProtocolException(RmpErrorCodes.UnsupportedMessage, "This version of Roomie doesn't support group messages.");
+            throw new RmpProtocolException(RmpErrorCodes.UnsupportedMessage, "The 'groups' feature wasn't agreed for this session.");
         }
 
-        if (chat.ConversationId != DirectConversation.IdFor(session.LocalDeviceId, peerId))
+        if (chat.ConversationId != (chat.GroupId ?? DirectConversation.IdFor(session.LocalDeviceId, peerId)))
         {
             throw new RmpProtocolException(RmpErrorCodes.InvalidFrame, "The message belongs to another conversation.");
         }
 
+        if (isGroup)
+        {
+            await _groups.CheckIncomingMessageAsync(session, chat.GroupId!, chat.MembershipVersion!.Value, cancellationToken).ConfigureAwait(false);
+        }
+
         // If this throws, no acknowledgement goes out and the sender tries again later.
-        var stored = new StoredMessage(message.MessageId, peerId, MessageDirection.Incoming, chat.Content, message.Timestamp, DeliveryState.Delivered);
+        var stored = new StoredMessage(message.MessageId, peerId, MessageDirection.Incoming, chat.Content, message.Timestamp, DeliveryState.Delivered, GroupId: chat.GroupId, MembershipVersion: chat.MembershipVersion);
         if (_store.TryAddIncoming(stored))
         {
             RaiseChanged(peerId);
@@ -372,7 +464,7 @@ public sealed partial class MessagingService : BackgroundService
             changed |= _store.Advance(peerId, id, state);
             lock (_gate)
             {
-                _attempts.Remove(id);
+                _attempts.Remove((id, peerId));
             }
         }
 
@@ -399,7 +491,20 @@ public sealed partial class MessagingService : BackgroundService
                 {
                     lock (_gate)
                     {
-                        _attempts.Remove(messageId);
+                        _attempts.Remove((messageId, peerId));
+                    }
+
+                    RaiseChanged(peerId);
+                }
+
+                break;
+
+            case RmpErrorCodes.NotAMember:
+                if (_store.Advance(peerId, messageId, DeliveryState.Failed, "Refused: one of you isn't in this group any more."))
+                {
+                    lock (_gate)
+                    {
+                        _attempts.Remove((messageId, peerId));
                     }
 
                     RaiseChanged(peerId);
@@ -436,6 +541,9 @@ public sealed partial class MessagingService : BackgroundService
 
     private JsonElement ToPayload(Guid peerId, string content) => SessionPayloads.ToElement(
         new ChatMessagePayload(DirectConversation.IdFor(_identity.Identity.DeviceId, peerId), RmpContentTypes.Text, content));
+
+    private static JsonElement ToGroupPayload(string groupId, int version, string content) => SessionPayloads.ToElement(
+        new ChatMessagePayload(groupId, RmpContentTypes.Text, content, groupId, version));
 
     private void RaiseChanged(Guid peerId) => Changed?.Invoke(this, peerId);
 

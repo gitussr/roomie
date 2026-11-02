@@ -11,6 +11,7 @@ using Roomie.App.ViewModels;
 using Roomie.App.Views;
 using Roomie.Core.Configuration;
 using Roomie.Core.Discovery;
+using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
 using Roomie.Core.Protocol;
@@ -21,6 +22,7 @@ using Roomie.Infrastructure.Storage;
 using Roomie.Infrastructure.Trust;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
 using Serilog;
@@ -89,7 +91,7 @@ public partial class App : Application
                 services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<IDeviceSigner>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<ITrustStore>(trust);
-                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text] });
+                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups] });
                 services.AddSingleton<ConnectionManager>();
                 services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
 
@@ -98,6 +100,8 @@ public partial class App : Application
 
                 services.AddSingleton(sp => new SqliteMessageStore(paths.DatabaseFile, sp.GetRequiredService<ILogger<SqliteMessageStore>>()));
                 services.AddSingleton<IMessageStore>(sp => sp.GetRequiredService<SqliteMessageStore>());
+                services.AddSingleton<IGroupStore>(sp => sp.GetRequiredService<SqliteMessageStore>());
+                services.AddSingleton<GroupService>();
                 services.AddSingleton(new MessagingOptions());
                 services.AddSingleton<MessagingService>();
                 services.AddHostedService(sp => sp.GetRequiredService<MessagingService>());

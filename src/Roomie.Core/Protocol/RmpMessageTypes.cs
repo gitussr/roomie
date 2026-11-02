@@ -54,6 +54,9 @@ public static class RmpErrorCodes
     public const string TransferRejected = "TRANSFER_REJECTED";
     public const string RateLimited = "RATE_LIMITED";
     public const string NotAMember = "NOT_A_MEMBER";
+
+    /// <summary>The recipient can't yet tell whether the sender is in the group. The sender retries.</summary>
+    public const string MembershipUpdating = "MEMBERSHIP_UPDATING";
     public const string InternalError = "INTERNAL_ERROR";
 }
 

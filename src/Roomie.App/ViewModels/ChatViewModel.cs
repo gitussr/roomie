@@ -2,34 +2,54 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
 using Roomie.Core.Trust;
+using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 
 namespace Roomie.App.ViewModels;
 
 /// <summary>One message as shown in the conversation.</summary>
-public sealed record ChatBubble(Guid MessageId, string Text, bool IsMine, string Time, string Status, bool IsProblem);
+public sealed record ChatBubble(Guid MessageId, string Text, bool IsMine, string Time, string Status, bool IsProblem, string? Sender = null);
 
-/// <summary>The open conversation. The whole list is rebuilt from the store on every change.</summary>
-public sealed partial class ChatViewModel(MessagingService messaging, IMessageStore store, ITrustStore trust) : ObservableObject
+/// <summary>A member of the open group.</summary>
+public sealed record GroupMemberItem(Guid DeviceId, string Name, string Status, bool CanRemove);
+
+/// <summary>A paired device the owner of the open group could invite.</summary>
+public sealed record GroupInviteCandidate(Guid DeviceId, string Name);
+
+/// <summary>The open conversation, with one device or a group. The whole list is rebuilt from the store on every change.</summary>
+public sealed partial class ChatViewModel(MessagingService messaging, GroupService groups, IMessageStore store, ITrustStore trust, ILocalIdentityProvider identity) : ObservableObject
 {
     /// <summary>The panel creates a control per message, so a long history can't all be shown until it can page.</summary>
     public const int MaxShownMessages = 500;
 
     public ObservableCollection<ChatBubble> Messages { get; } = [];
 
+    public ObservableCollection<GroupMemberItem> Members { get; } = [];
+
+    public ObservableCollection<GroupInviteCandidate> InviteCandidates { get; } = [];
+
     [ObservableProperty]
     private bool _hasOlderMessages;
 
     public Guid? PeerId { get; private set; }
+
+    public string? GroupId { get; private set; }
 
     /// <summary>The window is in front, so an open conversation is really being read.</summary>
     public bool IsWindowActive { get; set; } = true;
 
     [ObservableProperty]
     private bool _isOpen;
+
+    [ObservableProperty]
+    private bool _isGroup;
+
+    [ObservableProperty]
+    private string _membersTitle = string.Empty;
 
     [ObservableProperty]
     private string _peerName = string.Empty;
@@ -58,17 +78,36 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
     {
         if (PeerId != peerId)
         {
-            Draft = string.Empty;
-            SendError = null;
-            Messages.Clear();
+            Reset();
         }
 
         PeerId = peerId;
+        GroupId = null;
+        IsGroup = false;
+        IsOpen = true;
+    }
+
+    public void OpenGroup(string groupId)
+    {
+        if (GroupId != groupId)
+        {
+            Reset();
+        }
+
+        PeerId = null;
+        GroupId = groupId;
+        IsGroup = true;
         IsOpen = true;
     }
 
     public void Update(string connection)
     {
+        if (GroupId is { } groupId)
+        {
+            UpdateGroup(groupId);
+            return;
+        }
+
         if (PeerId is not { } peerId)
         {
             return;
@@ -86,18 +125,76 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
         CanCompose = peer is not null && !trust.IsBlocked(peerId);
         Problem = CanCompose ? messaging.GetDeliveryProblem(peerId) : "This device isn't paired, so you can't send it messages.";
 
+        ReadMessages(() => store.GetConversation(peerId, MaxShownMessages + 1), ToBubble);
+    }
+
+    private void UpdateGroup(string groupId)
+    {
+        StoredGroup? group;
+        IReadOnlyList<StoredInvite> invites;
         try
         {
-            // One more than is shown, to tell whether there are older messages.
-            var messages = store.GetConversation(peerId, MaxShownMessages + 1);
-            HasOlderMessages = messages.Count > MaxShownMessages;
-            Sync(messages.Skip(messages.Count - Math.Min(messages.Count, MaxShownMessages)).Select(ToBubble).ToList());
+            group = groups.GetGroup(groupId);
+            invites = groups.GetInvites();
         }
         catch (MessageStoreException)
         {
-            // What's on screen stays. The store logged the failure.
             Problem = "Roomie can't read your saved messages right now.";
+            return;
         }
+
+        if (group is null)
+        {
+            return;
+        }
+
+        if (IsWindowActive)
+        {
+            messaging.MarkGroupRead(groupId);
+        }
+
+        var self = identity.Identity.DeviceId;
+        var state = group.State;
+        var isOwner = state.OwnerId == self && group.IsMember;
+        PeerName = state.Name;
+        PeerDisplayId = "Group";
+        Connection = group.IsMember
+            ? $"{state.Members.Count} {(state.Members.Count == 1 ? "member" : "members")} · owner {NameOf(state, state.OwnerId)}"
+            : "You're no longer in this group";
+        CanCompose = group.IsMember;
+        MembersTitle = $"Members ({state.Members.Count})";
+
+        var unpaired = state.Members
+            .Where(m => m.DeviceId != self && trust.FindTrusted(m.DeviceId) is null)
+            .Select(m => m.Username)
+            .ToList();
+        Problem = !group.IsMember
+            ? "You were removed from this group. Its history stays on this computer, but you can't send to it."
+            : unpaired.Count > 0
+                ? $"You aren't paired with {string.Join(", ", unpaired)}. They won't get your messages until you pair with them."
+                : null;
+
+        var invited = invites
+            .Where(i => i.GroupId == groupId && i.Direction == InviteDirection.Outgoing)
+            .Select(i => i.PeerId)
+            .ToHashSet();
+
+        var members = state.Members
+            .Select(m => new GroupMemberItem(m.DeviceId, m.Username, MemberStatus(state, m.DeviceId), isOwner && m.DeviceId != self))
+            .Concat(invited.Where(id => !state.HasMember(id)).Select(id => new GroupMemberItem(
+                id, trust.FindTrusted(id)?.Username ?? DeviceIdFormat.ToDisplayId(id), "Invited, not answered yet", isOwner)))
+            .ToList();
+        SyncAll(Members, members);
+
+        var candidates = isOwner && state.Members.Count < GroupProtocol.MaxMembers
+            ? trust.TrustedPeers
+                .Where(p => !state.HasMember(p.DeviceId) && !invited.Contains(p.DeviceId) && !trust.IsBlocked(p.DeviceId))
+                .Select(p => new GroupInviteCandidate(p.DeviceId, p.Username))
+                .ToList()
+            : [];
+        SyncAll(InviteCandidates, candidates);
+
+        ReadMessages(() => store.GetGroupConversation(groupId, MaxShownMessages + 1), m => ToGroupBubble(m, group));
     }
 
     private bool CanSend() => CanCompose && !string.IsNullOrWhiteSpace(Draft);
@@ -105,12 +202,20 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
     [RelayCommand(CanExecute = nameof(CanSend))]
     private void Send()
     {
-        if (PeerId is not { } peerId)
+        MessageSendResult result;
+        if (GroupId is { } groupId)
+        {
+            result = messaging.SendGroupText(groupId, Draft);
+        }
+        else if (PeerId is { } peerId)
+        {
+            result = messaging.SendText(peerId, Draft);
+        }
+        else
         {
             return;
         }
 
-        var result = messaging.SendText(peerId, Draft);
         SendError = result.Error;
         if (result.Error is null)
         {
@@ -119,12 +224,74 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
     }
 
     [RelayCommand]
+    private void Invite(Guid deviceId)
+    {
+        if (GroupId is { } groupId)
+        {
+            SendError = groups.Invite(groupId, deviceId).Error;
+        }
+    }
+
+    [RelayCommand]
+    private void RemoveMember(Guid deviceId)
+    {
+        if (GroupId is { } groupId)
+        {
+            SendError = groups.Remove(groupId, deviceId).Error;
+        }
+    }
+
+    [RelayCommand]
     private void Close()
     {
+        Reset();
         PeerId = null;
+        GroupId = null;
+        IsGroup = false;
         IsOpen = false;
-        Messages.Clear();
     }
+
+    private void Reset()
+    {
+        Draft = string.Empty;
+        SendError = null;
+        Messages.Clear();
+        Members.Clear();
+        InviteCandidates.Clear();
+    }
+
+    private void ReadMessages(Func<IReadOnlyList<StoredMessage>> read, Func<StoredMessage, ChatBubble> toBubble)
+    {
+        try
+        {
+            // One more than is shown, to tell whether there are older messages.
+            var messages = read();
+            HasOlderMessages = messages.Count > MaxShownMessages;
+            Sync(messages.Skip(messages.Count - Math.Min(messages.Count, MaxShownMessages)).Select(toBubble).ToList());
+        }
+        catch (MessageStoreException)
+        {
+            // What's on screen stays. The store logged the failure.
+            Problem = "Roomie can't read your saved messages right now.";
+        }
+    }
+
+    private string MemberStatus(GroupState state, Guid deviceId)
+    {
+        if (deviceId == identity.Identity.DeviceId)
+        {
+            return deviceId == state.OwnerId ? "You, owner" : "You";
+        }
+
+        var role = deviceId == state.OwnerId ? "Owner" : "Member";
+        return trust.FindTrusted(deviceId) is null ? $"{role}, not paired with this computer" : role;
+    }
+
+    private string NameOf(GroupState state, Guid deviceId) =>
+        deviceId == identity.Identity.DeviceId ? "you"
+        : state.Members.FirstOrDefault(m => m.DeviceId == deviceId)?.Username
+          ?? trust.FindTrusted(deviceId)?.Username
+          ?? DeviceIdFormat.ToDisplayId(deviceId);
 
     // Changes only what differs, so the scroll position and any selected text survive an update.
     private void Sync(List<ChatBubble> wanted)
@@ -155,6 +322,60 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
         }
     }
 
+    private static void SyncAll<T>(ObservableCollection<T> items, List<T> wanted)
+    {
+        if (!items.SequenceEqual(wanted))
+        {
+            items.Clear();
+            foreach (var item in wanted)
+            {
+                items.Add(item);
+            }
+        }
+    }
+
+    private static string FormatTime(StoredMessage message) =>
+        message.Timestamp.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+
+    private ChatBubble ToGroupBubble(StoredMessage message, StoredGroup group)
+    {
+        if (message.Direction == MessageDirection.Incoming)
+        {
+            var updating = message.MembershipVersion > group.Version ? "Membership updating" : string.Empty;
+            return new ChatBubble(message.MessageId, message.Content, false, FormatTime(message), updating, false, NameOf(group.State, message.PeerId));
+        }
+
+        var recipients = message.Recipients ?? [];
+        var delivered = recipients.Count(r => r.State is DeliveryState.Delivered or DeliveryState.Read);
+        var read = recipients.Count(r => r.State == DeliveryState.Read);
+        var failed = recipients.Where(r => r.State == DeliveryState.Failed).ToList();
+        var waiting = recipients.Where(r => r.State is DeliveryState.Pending or DeliveryState.Sent).ToList();
+
+        var parts = new List<string>();
+        if (recipients.Count == 0)
+        {
+            parts.Add("No other members yet");
+        }
+        else
+        {
+            parts.Add($"Delivered to {delivered} of {recipients.Count}");
+        }
+
+        if (read > 0)
+        {
+            parts.Add($"read by {read}");
+        }
+
+        if (waiting.Count > 0)
+        {
+            parts.Add($"waiting for {string.Join(", ", waiting.Select(r => NameOf(group.State, r.DeviceId)))}");
+        }
+
+        parts.AddRange(failed.Select(r => $"not delivered to {NameOf(group.State, r.DeviceId)}: {r.Failure ?? "refused"}"));
+
+        return new ChatBubble(message.MessageId, message.Content, true, FormatTime(message), string.Join(" · ", parts), failed.Count > 0);
+    }
+
     private static ChatBubble ToBubble(StoredMessage message)
     {
         var mine = message.Direction == MessageDirection.Outgoing;
@@ -168,12 +389,6 @@ public sealed partial class ChatViewModel(MessagingService messaging, IMessageSt
             _ => string.Empty,
         };
 
-        return new ChatBubble(
-            message.MessageId,
-            message.Content,
-            mine,
-            message.Timestamp.ToLocalTime().ToString("g", CultureInfo.CurrentCulture),
-            status,
-            message.State == DeliveryState.Failed);
+        return new ChatBubble(message.MessageId, message.Content, mine, FormatTime(message), status, message.State == DeliveryState.Failed);
     }
 }

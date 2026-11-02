@@ -13,6 +13,7 @@ using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Messaging;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 
 namespace Roomie.Tests.Messaging;
@@ -349,7 +350,7 @@ public sealed class MessagingServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task GroupMessage_IsRefusedUntilGroupsExist()
+    public async Task GroupMessage_IsRefusedOnASessionWithoutGroups()
     {
         var bob = await StartAsync("Bob");
         await using var raw = await RawPeerAsync(bob, ["text"]);
@@ -555,7 +556,8 @@ public sealed class MessagingServiceTests : IAsyncLifetime
     private async Task<Node> StartAsync(DeviceIdentityStore identity, InMemoryTrustStore trust, string databasePath, MessagingOptions? messaging)
     {
         var registry = new PeerRegistry(TimeSpan.FromMinutes(1));
-        var store = new FlakyStore(new SqliteMessageStore(databasePath));
+        var sqlite = new SqliteMessageStore(databasePath);
+        var store = new FlakyStore(sqlite);
         var connections = new ConnectionManager(identity, identity, new StaticInterfaces(), registry, trust,
             new ConnectionOptions
             {
@@ -567,7 +569,8 @@ public sealed class MessagingServiceTests : IAsyncLifetime
                 LargerIdDialDelay = TimeSpan.FromHours(1),
             },
             TimeProvider.System, NullLogger<ConnectionManager>.Instance);
-        var service = new MessagingService(connections, store, trust, identity, messaging ?? new MessagingOptions { SweepInterval = TimeSpan.FromMilliseconds(50) }, TimeProvider.System, NullLogger<MessagingService>.Instance);
+        var groups = new GroupService(connections, sqlite, trust, identity, identity, TimeProvider.System, NullLogger<GroupService>.Instance);
+        var service = new MessagingService(connections, store, trust, identity, groups, messaging ?? new MessagingOptions { SweepInterval = TimeSpan.FromMilliseconds(50) }, TimeProvider.System, NullLogger<MessagingService>.Instance);
 
         var node = new Node(identity, registry, trust, store, databasePath, connections, service);
         _cleanup.Add(node);
@@ -623,6 +626,30 @@ public sealed class MessagingServiceTests : IAsyncLifetime
         {
             Check();
             return inner.GetConversation(peerId, maxMessages);
+        }
+
+        public void AddOutgoingGroup(StoredMessage message, IReadOnlyCollection<Guid> recipients)
+        {
+            Check();
+            inner.AddOutgoingGroup(message, recipients);
+        }
+
+        public IReadOnlyList<StoredMessage> GetGroupConversation(string groupId, int maxMessages = int.MaxValue)
+        {
+            Check();
+            return inner.GetGroupConversation(groupId, maxMessages);
+        }
+
+        public IReadOnlyList<Guid> MarkGroupRead(string groupId)
+        {
+            Check();
+            return inner.MarkGroupRead(groupId);
+        }
+
+        public IReadOnlyDictionary<string, int> GetGroupUnreadCounts()
+        {
+            Check();
+            return inner.GetGroupUnreadCounts();
         }
 
         public IReadOnlyList<StoredMessage> GetUndelivered(Guid peerId)

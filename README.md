@@ -12,11 +12,25 @@ Roomie is a peer-to-peer LAN messenger for Windows. It needs no server, internet
 - **Phase 5 (RMP protocol), done.** Every message type now has central rules: whether it needs a paired device, which capability it belongs to, and how large it may be. Text bodies are limited to 16 KiB and file offers to 100 MB. Validated messages go to the one service that owns their type. An unknown or refused message gets an `ERROR` and the session stays open, up to 30 refusals a minute, and a failing handler no longer harms the session. `HELLO` now negotiates the protocol version and the capabilities both sides offer. The order of the checks is in architecture.md §5.4.
 - **Phase 6 (messaging), done.** Choose **Chat** next to a paired device to send it text. Each message shows *Waiting to send*, *Sent*, *Delivered* (the other PC stored it) or *Read* (someone there had the conversation open). A message to an offline device waits and goes out when it reconnects. Messages that may have been lost are sent again, and duplicates are never stored twice. The rules are in architecture.md §6.
 - **Phase 7 (saved messages), done.** Messages are saved in `database\messenger.db` (SQLite), so history, unread counts, messages still waiting and read receipts still owed all survive closing Roomie, a crash or a power cut. Every message is on disk before it is sent or acknowledged. A damaged database, or one from a newer Roomie, is refused with an explanation and never overwritten. The database isn't encrypted: it's protected by your Windows account, like other files in your profile. Forgetting a device keeps its messages. The rules are in architecture.md §6.
-- **Next: Phase 8,** group messaging.
+- **Phase 8 (groups), done.** Type a name under **Groups** and choose **New group**, then open **Members** to invite paired devices. An invited device joins only if its user chooses **Join**. Each member's copy of a message is delivered and tracked separately, so one offline member holds nobody else up. Only the owner can add or remove members, and every change is signed with the owner's device key, so any member can pass it on but none can forge it. Being in a group creates no trust: a member you haven't paired with gets your messages only once you pair. A removed device keeps its history but can't send. There is no leaving a group or changing its owner in this version. The rules are in architecture.md §7.
+- **Next: Phase 9,** file transfer.
+
+### Testing groups on two PCs
+
+Run the same 0.8.0 build on both PCs. Your paired devices and saved messages carry over, and the database is upgraded on first run, after which older versions refuse it.
+
+1. On PC A, type a name under **Groups**, choose **New group**, open **Members** and choose **Invite** next to PC B.
+2. PC B should come to the front and show the invitation. Choose **Decline**: nothing should change on A, and B shouldn't be asked again until A invites again. Invite again and choose **Join** on B. Both should show two members.
+3. Send messages each way in the group. The sender should see *Delivered to 1 of 1*, and *read by 1* once the other side has it open. Messages should not appear in the one-to-one **Chat** with that device, and that chat should still work.
+4. Keep the group closed on B and send from A: the **Open** button and window title on B should show an unread count.
+5. Close Roomie on B and send from A: it should show *waiting for* B. Close and reopen A, then open B: it should arrive once.
+6. On A, choose **Remove** next to B. B should say it was removed, keep its history and be unable to send, and A's next message should go to nobody. Invite B again, and it should be able to rejoin.
+
+Two PCs can't exercise a third member, so groups of three or more, relaying between members and members who aren't paired with each other are covered only by automated tests.
 
 ### Testing saved messages on two PCs
 
-Run the same 0.7.0 build on both PCs. Devices paired on an earlier version stay paired. Messages from 0.6.0 were never saved, so history starts empty.
+Run the same build on both PCs. Devices paired on an earlier version stay paired.
 
 1. Send a few messages each way, then close Roomie on both PCs and open it again. The history should still be there, with the same *Delivered* or *Read* states and in the same order.
 2. On PC A, keep the conversation closed while PC B sends a message. Close Roomie on A and reopen it: the unread count should still show.

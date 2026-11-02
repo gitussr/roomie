@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Roomie.Core.Groups;
 
 namespace Roomie.Core.Protocol;
 
@@ -80,12 +81,13 @@ public static class RmpMessagePolicy
         new(RmpMessageTypes.MessageAck, Small, RequiredCapability: RmpCapabilities.Text, Validate: ContentPayloads.CheckMessageAck),
         new(RmpMessageTypes.MessageRead, Small, RequiredCapability: RmpCapabilities.Text, Validate: ContentPayloads.CheckMessageRead),
 
+        // Creating a group is local, so nothing sends GROUP_CREATE and no service owns it.
         new(RmpMessageTypes.GroupCreate, Metadata, RequiredCapability: RmpCapabilities.Groups),
-        new(RmpMessageTypes.GroupInvite, Metadata, RequiredCapability: RmpCapabilities.Groups),
-        new(RmpMessageTypes.GroupAccept, Small, RequiredCapability: RmpCapabilities.Groups),
-        new(RmpMessageTypes.GroupRemove, Small, RequiredCapability: RmpCapabilities.Groups),
-        new(RmpMessageTypes.GroupState, Frame, RequiredCapability: RmpCapabilities.Groups),
-        new(RmpMessageTypes.GroupStateRequest, Small, RequiredCapability: RmpCapabilities.Groups),
+        new(RmpMessageTypes.GroupInvite, Frame, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckInvite),
+        new(RmpMessageTypes.GroupAccept, Small, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckAccept),
+        new(RmpMessageTypes.GroupRemove, 2 * Small, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckRemoval),
+        new(RmpMessageTypes.GroupState, Frame, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckState),
+        new(RmpMessageTypes.GroupStateRequest, Small, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckStateRequest),
 
         new(RmpMessageTypes.FileOffer, Metadata, RequiredCapability: RmpCapabilities.FileTransfer, Validate: ContentPayloads.CheckFileOffer),
         new(RmpMessageTypes.FileAccept, Small, RequiredCapability: RmpCapabilities.FileTransfer),

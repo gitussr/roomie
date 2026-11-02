@@ -28,6 +28,9 @@ public enum DeliveryState
 /// <param name="Timestamp">Creation time on the sender, kept to the millisecond. For display order only, never for security decisions.</param>
 /// <param name="Failure">Why the message wasn't delivered, when <see cref="State"/> is Failed.</param>
 /// <param name="ReadReceiptPending">An incoming message was read, and the sender hasn't been told yet.</param>
+/// <param name="GroupId">The group it belongs to, or null in a one-to-one conversation.</param>
+/// <param name="MembershipVersion">The group membership it was sent under.</param>
+/// <param name="Recipients">How far each member got, on an outgoing group message read from a group conversation.</param>
 public sealed record StoredMessage(
     Guid MessageId,
     Guid PeerId,
@@ -36,8 +39,15 @@ public sealed record StoredMessage(
     DateTimeOffset Timestamp,
     DeliveryState State,
     string? Failure = null,
-    bool ReadReceiptPending = false);
+    bool ReadReceiptPending = false,
+    string? GroupId = null,
+    int? MembershipVersion = null,
+    IReadOnlyList<MessageRecipient>? Recipients = null);
 
+/// <summary>One member's copy of an outgoing group message, which is delivered independently (architecture.md §7).</summary>
+public sealed record MessageRecipient(Guid DeviceId, DeliveryState State, string? Failure);
+
+/// <summary>Unread counts one-to-one messages only. Waiting work includes group copies for this device.</summary>
 public sealed record ConversationSummary(Guid PeerId, int UnreadCount, bool HasWaitingWork);
 
 /// <summary>
@@ -54,23 +64,39 @@ public interface IMessageStore
     /// <returns>False if this message was already stored; the existing copy is kept unchanged.</returns>
     bool TryAddIncoming(StoredMessage message);
 
-    /// <summary>The latest messages with a device, in display order.</summary>
+    /// <summary>Saves a group message to send, with one copy to deliver per recipient.</summary>
+    void AddOutgoingGroup(StoredMessage message, IReadOnlyCollection<Guid> recipients);
+
+    /// <summary>The latest one-to-one messages with a device, in display order.</summary>
     IReadOnlyList<StoredMessage> GetConversation(Guid peerId, int maxMessages = int.MaxValue);
 
-    /// <summary>Outgoing messages that haven't been acknowledged, oldest first.</summary>
+    /// <summary>The latest messages in a group, in display order.</summary>
+    IReadOnlyList<StoredMessage> GetGroupConversation(string groupId, int maxMessages = int.MaxValue);
+
+    /// <summary>
+    /// What still has to be delivered to a device, oldest first: one-to-one messages and group copies. For a
+    /// group copy, <see cref="StoredMessage.PeerId"/> and <see cref="StoredMessage.State"/> are this device's.
+    /// </summary>
     IReadOnlyList<StoredMessage> GetUndelivered(Guid peerId);
 
     /// <summary>
-    /// Moves an outgoing message forward: Pending, Sent, Delivered, Read. It never moves back, so a late or
-    /// repeated acknowledgement can't undo a read receipt. Failed applies only before delivery; a later
-    /// acknowledgement overrides it, because the message did arrive.
+    /// Moves an outgoing message, or this device's copy of a group message, forward: Pending, Sent, Delivered,
+    /// Read. It never moves back, so a late or repeated acknowledgement can't undo a read receipt. Failed
+    /// applies only before delivery; a later acknowledgement overrides it, because the message did arrive.
     /// </summary>
     /// <returns>False if the message is unknown or the change would be a step backwards.</returns>
     bool Advance(Guid peerId, Guid messageId, DeliveryState state, string? failure = null);
 
-    /// <summary>Marks every unread incoming message as read and owing a read receipt.</summary>
+    /// <summary>Marks every unread one-to-one message from a device as read and owing a read receipt.</summary>
     /// <returns>Whether anything changed.</returns>
     bool MarkIncomingRead(Guid peerId);
+
+    /// <summary>Marks every unread message in a group as read and owing a read receipt.</summary>
+    /// <returns>The senders now owed a receipt.</returns>
+    IReadOnlyList<Guid> MarkGroupRead(string groupId);
+
+    /// <summary>Unread messages per group, leaving out groups with none.</summary>
+    IReadOnlyDictionary<string, int> GetGroupUnreadCounts();
 
     IReadOnlyList<Guid> GetPendingReadReceipts(Guid peerId);
 

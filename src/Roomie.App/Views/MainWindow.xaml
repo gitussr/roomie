@@ -37,7 +37,7 @@
                             <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="10,2" Content="Rename"
                                     Command="{Binding SaveUsernameCommand}" IsDefault="True" />
                             <TextBox Text="{Binding UsernameDraft, UpdateSourceTrigger=PropertyChanged}"
-                                     MaxLength="32" AutomationProperties.Name="Username" />
+                                     MaxLength="32" VerticalContentAlignment="Center" AutomationProperties.Name="Username" />
                         </DockPanel>
                         <TextBlock Text="{Binding UsernameError}" Foreground="Firebrick" TextWrapping="Wrap">
                             <TextBlock.Style>
@@ -94,6 +94,78 @@
                             </TextBlock.Style>
                         </TextBlock>
                     </StackPanel>
+
+                    <!-- Groups: docked before the device list, which takes the space that's left. -->
+                    <Border DockPanel.Dock="Bottom" Margin="0,8,0,0" Padding="0,8,0,0" MaxHeight="240"
+                            BorderBrush="LightGray" BorderThickness="0,1,0,0">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <TextBlock Text="Groups" FontSize="18" FontWeight="SemiBold" />
+                                <ItemsControl ItemsSource="{Binding GroupInvites}" AutomationProperties.Name="Group invitations" Focusable="False">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate DataType="{x:Type vm:GroupInviteItem}">
+                                            <Border Margin="0,6,0,0" Padding="8,6" Background="#FFF6E0" CornerRadius="4">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding GroupName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding Details}" FontSize="11" TextWrapping="Wrap" />
+                                                    <WrapPanel Margin="0,4,0,0">
+                                                        <Button Content="Join" Padding="10,1" Margin="0,0,6,0" FontWeight="SemiBold"
+                                                                Command="{Binding DataContext.AcceptInviteCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                CommandParameter="{Binding}"
+                                                                AutomationProperties.Name="{Binding GroupName, StringFormat='Join {0}'}" />
+                                                        <Button Content="Decline" Padding="10,1"
+                                                                Command="{Binding DataContext.DeclineInviteCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                CommandParameter="{Binding}"
+                                                                AutomationProperties.Name="{Binding GroupName, StringFormat='Decline {0}'}" />
+                                                    </WrapPanel>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <ItemsControl ItemsSource="{Binding Groups}" AutomationProperties.Name="Groups" Focusable="False">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate DataType="{x:Type vm:GroupItem}">
+                                            <DockPanel Margin="0,6,0,0">
+                                                <Button DockPanel.Dock="Right" Content="{Binding ChatLabel}" Padding="10,1" VerticalAlignment="Center"
+                                                        Command="{Binding DataContext.OpenGroupCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding GroupId}"
+                                                        AutomationProperties.Name="{Binding Name, StringFormat='Open group {0}'}" />
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding Details}" Foreground="Gray" FontSize="11" />
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <DockPanel Margin="0,8,0,0">
+                                    <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="10,2" Content="New group"
+                                            Command="{Binding CreateGroupCommand}" />
+                                    <TextBox Text="{Binding NewGroupName, UpdateSourceTrigger=PropertyChanged}" MaxLength="64"
+                                             VerticalContentAlignment="Center" AutomationProperties.Name="New group name">
+                                        <TextBox.InputBindings>
+                                            <KeyBinding Key="Enter" Command="{Binding CreateGroupCommand}" />
+                                        </TextBox.InputBindings>
+                                    </TextBox>
+                                </DockPanel>
+                                <TextBlock Text="{Binding GroupError}" Foreground="Firebrick" FontSize="11" TextWrapping="Wrap">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Style.Triggers>
+                                                <Trigger Property="Text" Value="{x:Null}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </Trigger>
+                                                <Trigger Property="Text" Value="">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Border>
 
                     <ListBox Margin="0,8,0,0" ItemsSource="{Binding NearbyDevices}" BorderThickness="0"
                              HorizontalContentAlignment="Stretch"
@@ -253,6 +325,48 @@
                     </DockPanel>
                 </Border>
 
+                <!-- Who is in the open group, and for its owner, who can be invited. -->
+                <Expander DockPanel.Dock="Top" Margin="16,6" Header="{Binding Chat.MembersTitle}"
+                          Visibility="{Binding Chat.IsGroup, Converter={StaticResource BoolToVisibility}}">
+                    <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="0,4,0,0">
+                            <ItemsControl ItemsSource="{Binding Chat.Members}" Focusable="False" AutomationProperties.Name="Members">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type vm:GroupMemberItem}">
+                                        <DockPanel Margin="0,2">
+                                            <Button DockPanel.Dock="Right" Content="Remove" Padding="10,1"
+                                                    Command="{Binding DataContext.Chat.RemoveMemberCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                    CommandParameter="{Binding DeviceId}"
+                                                    Visibility="{Binding CanRemove, Converter={StaticResource BoolToVisibility}}"
+                                                    AutomationProperties.Name="{Binding Name, StringFormat='Remove {0}'}" />
+                                            <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                                <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold" />
+                                                <Run Text="{Binding Status, Mode=OneWay}" Foreground="Gray" FontSize="11" />
+                                            </TextBlock>
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <ItemsControl ItemsSource="{Binding Chat.InviteCandidates}" Focusable="False" AutomationProperties.Name="Devices you can invite">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type vm:GroupInviteCandidate}">
+                                        <DockPanel Margin="0,2">
+                                            <Button DockPanel.Dock="Right" Content="Invite" Padding="10,1"
+                                                    Command="{Binding DataContext.Chat.InviteCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                    CommandParameter="{Binding DeviceId}"
+                                                    AutomationProperties.Name="{Binding Name, StringFormat='Invite {0}'}" />
+                                            <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                                <Run Text="{Binding Name, Mode=OneWay}" />
+                                                <Run Text="Paired, not in this group" Foreground="Gray" FontSize="11" />
+                                            </TextBlock>
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Expander>
+
                 <Border DockPanel.Dock="Bottom" Padding="12" BorderBrush="LightGray" BorderThickness="0,1,0,0">
                     <StackPanel>
                         <TextBlock Margin="0,0,0,6" Text="{Binding Chat.Problem}" Foreground="Firebrick" TextWrapping="Wrap">
@@ -322,10 +436,24 @@
                                         </Style>
                                     </Border.Style>
                                     <StackPanel>
+                                        <TextBlock Margin="0,0,0,2" Text="{Binding Sender}" FontSize="11" FontWeight="SemiBold">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Style.Triggers>
+                                                        <Trigger Property="Text" Value="{x:Null}">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </Trigger>
+                                                        <Trigger Property="Text" Value="">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </Trigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
                                         <!-- A read-only box, so people can select and copy. Text is only ever shown as text. -->
                                         <TextBox Text="{Binding Text, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
                                                  BorderThickness="0" Background="Transparent" Padding="0" />
-                                        <TextBlock Margin="0,3,0,0" FontSize="10" Foreground="#606060">
+                                        <TextBlock Margin="0,3,0,0" FontSize="10" Foreground="#606060" TextWrapping="Wrap">
                                             <Run Text="{Binding Time, Mode=OneWay}" />
                                             <Run Text="{Binding Status, Mode=OneWay}" />
                                         </TextBlock>

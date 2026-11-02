@@ -755,14 +755,14 @@ Rules:
 
 - **Read receipts** are sent only while the conversation is open and the window has focus.
 - **Display order** is by timestamp. Equal timestamps keep their arrival order, because timestamps on the wire have millisecond precision.
-- **Group copies** are refused with `UNSUPPORTED_MESSAGE` until Phase 8.
+- **Group copies** follow §7, and are refused with `UNSUPPORTED_MESSAGE` on a session that didn't agree the `groups` capability. Copies for a device that didn't agree it wait, so the refusal can't hold its one-to-one messages.
 
 ### Message storage as implemented
 
-Messages live in `database\messenger.db`, in one SQLite table for now. The other tables in §11 arrive with the phases that need them.
+Messages live in `database\messenger.db`. Tables in §11 arrive with the phases that need them. Groups added `groups`, `group_invites`, `group_removal_notices` and `message_recipients` (the `MessageReceipts` of §11). `GroupMembers` and `GroupMembershipEvents` aren't separate tables, because each group keeps its latest signed state whole, which is what gets relayed.
 
 - **Durability.** Each write commits before the call returns, in WAL mode with `synchronous = FULL`. WAL's usual `NORMAL` setting can lose the latest commits in a power cut, and `MESSAGE_ACK` promises the message is stored. A write takes about 15–35 ms on the development PC.
-- **Duplicates.** `UNIQUE (peer_id, direction, message_id)` is the `(message_id, sender_id)` rule above: an incoming message's sender is its peer, and an outgoing message's sender is this device. Phase 8 will need to revisit this, because a group conversation has several senders.
+- **Duplicates.** `UNIQUE (peer_id, direction, message_id)` is the `(message_id, sender_id)` rule above: an incoming message's sender is its peer, also in a group, and an outgoing message's sender is this device.
 - **Restarts.** Waiting messages, unacknowledged messages and owed read receipts are all in the database, so a restart loses nothing. They go out on the next session, with the same `messageId` and `timestamp`. Which messages are in flight isn't saved, so anything unacknowledged is simply sent again, and the recipient recognizes it.
 - **Failures.** If a write fails, nothing is acknowledged and the sender retries. If saving a new outgoing message fails, the user is told and keeps the text. Roomie keeps running through read and write failures.
 - **Opening.** Schema changes are ordered migrations tracked by `PRAGMA user_version`, each in its own transaction. A database that is damaged or from a newer Roomie is refused with an explanation and left untouched, never recreated.
@@ -857,6 +857,34 @@ Track delivery independently:
 Don't treat a group message as delivered simply because one member received it.
 
 Important limitation: This is not a fully replicated distributed group database. V1 will use explicit membership updates, direct peer delivery, and local history. Offline group members may receive messages when the sender reconnects and retries. More advanced group synchronization can come later.
+
+### Groups as implemented
+
+Payloads:
+
+| Message | Payload |
+| ------- | ------- |
+| `GROUP_INVITE` | `inviteId`, and a signed state as `document` and `signature` |
+| `GROUP_ACCEPT` | `groupId`, `inviteId`, `accepted`: the answer either way |
+| `GROUP_STATE` | `document`, `signature`: the JSON of a state, with the owner's signature over exactly that text |
+| `GROUP_REMOVE` | `document`, `signature`: a signed notice to one removed device |
+| `GROUP_STATE_REQUEST` | `groupId` |
+
+Creating a group is local, so nothing sends `GROUP_CREATE`, and it is refused like any type without an owner.
+
+Rules:
+
+- **Being in a group creates no trust.** Group messages travel only over paired sessions. A member you aren't paired with is shown as such, and its copy waits until you pair. Pairing still needs both users and the code check of §3.1, so an owner can't introduce devices to each other.
+- **Trust in a state.** An invitation must come from the owner itself, with an owner key whose fingerprint equals the one pinned for that device at pairing. That key is then remembered with the group. Later states may come from anyone, but must carry a higher version, keep the same owner, and be signed by the remembered key.
+- **Joining.** A device joins only with a state naming it, after its user accepted an invitation from that owner. A state alone can't add anyone.
+- **Removal.** A removed device gets a signed `GROUP_REMOVE`, not the new state, because it has no right to see the new members. It keeps its history and can't send.
+- **Delivery.** Membership has no acknowledgements or retries of its own. On each session and after each change, a device sends the other whatever it may have missed, and repeats are harmless. Members relay states to each other, so a change reaches a member while the owner is offline. Membership goes out before messages on a session.
+- **Per-recipient tracking.** An outgoing group message has one copy per member of the membership when it was sent, each with its own state. Copies to a device no longer in the group are marked Failed. Copies count towards the same limit of 16 unacknowledged messages per device, and a `NOT_A_MEMBER` refusal fails only that copy.
+- **Limits.** 32 members, a group name of 64 characters, and 20 unanswered invitations from one device.
+
+**One change from the table above.** A message at a higher version from a device that isn't a member at the local version isn't stored. It gets `MEMBERSHIP_UPDATING`, and the sender retries. Storing it would let a removed member keep posting just by claiming a higher version, since nothing would ever disprove it. A genuine new member's message arrives once the signed state does. A higher version from a current member is stored and marked as the table says. The same code answers a device that accepted an invitation but hasn't received the state yet.
+
+**Not in V1.** There is no ownership transfer, and no leaving a group: only the owner can remove a member, as above. If the owner is gone for good, membership can't change. Members' names in a state are what the owner saw when they joined, and a group can't be renamed from the app.
 
 # 8. File transfer protocol
 
@@ -979,6 +1007,7 @@ Suggested error codes:
 | `TRANSFER_REJECTED`   | File transfer declined          |
 | `RATE_LIMITED`        | Too many requests               |
 | `NOT_A_MEMBER`        | Sender not in the group at that membership version |
+| `MEMBERSHIP_UPDATING` | The recipient can't yet tell whether the sender is in the group. The sender retries (§7) |
 | `INTERNAL_ERROR`      | Unexpected application error    |
 
 Never expose internal exception details or sensitive file paths through network error messages.
