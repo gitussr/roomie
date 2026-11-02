@@ -6,11 +6,13 @@ using Roomie.Core.Configuration;
 using Roomie.Core.Connections;
 using Roomie.Core.Discovery;
 using Roomie.Core.Identity;
+using Roomie.Core.Messaging;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
 
 namespace Roomie.App.ViewModels;
@@ -28,7 +30,9 @@ public sealed record NearbyDevice(
     bool CanDisconnect,
     bool CanPair,
     bool CanForget,
-    bool CanUnblock);
+    bool CanUnblock,
+    bool CanChat = false,
+    string ChatLabel = "Chat");
 
 public sealed partial class MainViewModel : ObservableObject
 {
@@ -38,6 +42,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly ConnectionManager _connections;
     private readonly PairingService _pairing;
     private readonly ITrustStore _trust;
+    private readonly IMessageStore _messages;
     private readonly SynchronizationContext _ui;
     private int _refreshQueued;
 
@@ -48,8 +53,14 @@ public sealed partial class MainViewModel : ObservableObject
         DiscoveryService discovery,
         ConnectionManager connections,
         PairingService pairing,
+        MessagingService messaging,
+        IMessageStore messages,
         ITrustStore trust)
     {
+        ArgumentNullException.ThrowIfNull(messaging);
+        _messages = messages;
+        Chat = new ChatViewModel(messaging, messages, trust);
+
         _identityStore = identityStore;
         _registry = registry;
         _discovery = discovery;
@@ -76,6 +87,7 @@ public sealed partial class MainViewModel : ObservableObject
         pairing.Changed += (_, _) => QueueRefresh();
         pairing.IncomingRequest += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
         trust.Changed += (_, _) => QueueRefresh();
+        messaging.Changed += (_, _) => QueueRefresh();
         Refresh();
     }
 
@@ -84,7 +96,19 @@ public sealed partial class MainViewModel : ObservableObject
 
     public PairingViewModel Pairing { get; }
 
+    public ChatViewModel Chat { get; }
+
     public string Title { get; } = "Roomie";
+
+    /// <summary>Includes the unread count, so new messages show on the taskbar.</summary>
+    [ObservableProperty]
+    private string _windowTitle = "Roomie";
+
+    [ObservableProperty]
+    private bool _isChatVisible;
+
+    [ObservableProperty]
+    private bool _isWelcomeVisible = true;
 
     public string AppVersion { get; }
 
@@ -173,6 +197,27 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void Unblock(Guid deviceId) => _trust.Unblock(deviceId);
 
+    [RelayCommand]
+    private void OpenChat(Guid deviceId)
+    {
+        Chat.Open(deviceId);
+        Refresh();
+    }
+
+    [RelayCommand]
+    private void CloseChat()
+    {
+        Chat.CloseCommand.Execute(null);
+        Refresh();
+    }
+
+    /// <summary>Called when the window gains or loses focus: messages count as read only while it has focus.</summary>
+    public void OnWindowActiveChanged(bool isActive)
+    {
+        Chat.IsWindowActive = isActive;
+        QueueRefresh();
+    }
+
     // Coalesces bursts of background events into one UI update.
     private void QueueRefresh()
     {
@@ -200,6 +245,20 @@ public sealed partial class MainViewModel : ObservableObject
         PeerConnectionInfo ConnectionOf(Guid id) =>
             connections.GetValueOrDefault(id) ?? new PeerConnectionInfo(id, PeerConnectionState.Disconnected);
 
+        // Updated first: an open conversation being read must not count as unread below.
+        if (Chat.PeerId is { } chatPeer)
+        {
+            var info = ConnectionOf(chatPeer);
+            Chat.Update(info.IsConnected ? "Connected" : "Not connected. Messages will be sent when this device is back.");
+        }
+
+        IsChatVisible = Chat.IsOpen && !Pairing.IsVisible;
+        IsWelcomeVisible = !Chat.IsOpen && !Pairing.IsVisible;
+
+        var unread = _messages.GetConversations().ToDictionary(c => c.PeerId, c => c.UnreadCount);
+        var totalUnread = unread.Values.Sum();
+        WindowTitle = totalUnread > 0 ? $"({totalUnread}) {Title}" : Title;
+
         foreach (var peer in peers)
         {
             var address = peer.Addresses.Count > 1
@@ -224,6 +283,16 @@ public sealed partial class MainViewModel : ObservableObject
         {
             NearbyDevices.Add(ToItem(peer.Username, DeviceIdFormat.ToDisplayId(peer.DeviceId), "offline", string.Empty,
                 ConnectionOf(peer.DeviceId), isTrusted: true, isBlocked: false, pairingBusy));
+        }
+
+        for (var i = 0; i < NearbyDevices.Count; i++)
+        {
+            var count = unread.GetValueOrDefault(NearbyDevices[i].DeviceId);
+            NearbyDevices[i] = NearbyDevices[i] with
+            {
+                CanChat = NearbyDevices[i].CanForget,
+                ChatLabel = count > 0 ? $"Chat ({count})" : "Chat",
+            };
         }
 
         var status = _discovery.Status;

@@ -82,6 +82,11 @@ public sealed partial class RmpDispatcher(ILogger logger)
         {
             throw;
         }
+        catch (RmpProtocolException ex)
+        {
+            // The handler found the message itself unacceptable, which only it could judge.
+            return new RmpRejection(ex.Code, ex.Message);
+        }
         catch (Exception ex)
         {
             LogHandlerFailed(logger, message.Type, session.RemoteDeviceId, ex);

@@ -12,12 +12,15 @@ using Roomie.App.Views;
 using Roomie.Core.Configuration;
 using Roomie.Core.Discovery;
 using Roomie.Core.Identity;
+using Roomie.Core.Messaging;
+using Roomie.Core.Protocol;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
 using Roomie.Infrastructure.Trust;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
 using Serilog;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
@@ -85,12 +88,17 @@ public partial class App : Application
                 services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<IDeviceSigner>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<ITrustStore>(trust);
-                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion });
+                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text] });
                 services.AddSingleton<ConnectionManager>();
                 services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
 
                 services.AddSingleton(new PairingOptions());
                 services.AddSingleton<PairingService>();
+
+                services.AddSingleton<IMessageStore, InMemoryMessageStore>(_ => new InMemoryMessageStore());
+                services.AddSingleton(new MessagingOptions());
+                services.AddSingleton<MessagingService>();
+                services.AddHostedService(sp => sp.GetRequiredService<MessagingService>());
 
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<MainWindow>();
@@ -111,6 +119,7 @@ public partial class App : Application
 
         // Services claim their message types when created, so create them before sessions can open.
         _host.Services.GetRequiredService<PairingService>();
+        _host.Services.GetRequiredService<MessagingService>();
 
         await _host.StartAsync();
 

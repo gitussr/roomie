@@ -1,4 +1,5 @@
-﻿using System.Windows;
+﻿using System.Collections.Specialized;
+using System.Windows;
 using Roomie.App.ViewModels;
 
 namespace Roomie.App.Views;
@@ -10,6 +11,17 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = viewModel;
         viewModel.AttentionRequested += (_, _) => RequestAttention();
+        viewModel.Chat.Messages.CollectionChanged += OnMessagesChanged;
+        Activated += (_, _) => viewModel.OnWindowActiveChanged(true);
+        Deactivated += (_, _) => viewModel.OnWindowActiveChanged(false);
+    }
+
+    private void OnMessagesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action == NotifyCollectionChangedAction.Add)
+        {
+            MessageScroller.ScrollToEnd();
+        }
     }
 
     /// <summary>

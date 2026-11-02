@@ -729,6 +729,36 @@ This gives you at-least-once transmission with effectively-once persistence for 
 
 Do not promise true exactly-once network delivery.
 
+### Messaging as implemented
+
+Payloads, in addition to `CHAT_MESSAGE` above:
+
+| Message | Payload |
+| ------- | ------- |
+| `MESSAGE_ACK` | `messageId`: the message now stored |
+| `MESSAGE_READ` | `messageIds`: 1–20 messages read; more take several messages |
+
+Rules:
+
+- **Conversation ID.** A one-to-one chat's `conversationId` is the two device IDs without dashes, smaller first, so both sides work it out independently. A message with any other ID is refused.
+- **Retries.** A message goes out when written, again on every new session, and again on the same session after 30 seconds without an acknowledgement, always with the same `messageId` and `timestamp`.
+- **Duplicates.** A repeated message isn't stored again, and is acknowledged again, because its sender is retrying.
+- **Who can confirm.** `MESSAGE_ACK` and `MESSAGE_READ` only count for messages sent to the device that sends them, and states only move forward.
+- **Flow control.** At most 16 messages per device wait for an acknowledgement at once.
+- **Refusals.** An `ERROR` whose `requestId` names an undelivered message decides what happens next:
+
+| Code | Result |
+| ---- | ------ |
+| `MESSAGE_TOO_LARGE`, `INVALID_FRAME` | That message is marked Failed. Retrying wouldn't help. |
+| `PEER_NOT_TRUSTED`, `UNSUPPORTED_MESSAGE` | Sending stops on this session until a new session or a trust change, with an explanation in the conversation. Retries would only use up the limit on refusals (§5.4). |
+| Anything else | Treated as temporary: the message is retried. |
+
+- **Read receipts** are sent only while the conversation is open and the window has focus.
+- **Display order** is by timestamp. Equal timestamps keep their arrival order, because timestamps on the wire have millisecond precision.
+- **Group copies** are refused with `UNSUPPORTED_MESSAGE` until Phase 8.
+
+Phase 6 keeps messages in memory behind `IMessageStore`, so history and waiting messages are lost when Roomie closes, and the conversation panel says so. Phase 7 replaces this with SQLite.
+
 ### Offline messages
 
 Alice sends a message while Bob is offline.
@@ -909,7 +939,7 @@ Rules:
 
 For V1, both peers should support the same core protocol version.
 
-As implemented, each session uses the highest version both sides support and the intersection of the capabilities both advertised. A capability only one side knows is dropped, not an error. If the version ranges don't overlap, the connection is refused with `UNSUPPORTED_VERSION`. Capabilities are advertised only once the service behind them exists: none yet, `text` from Phase 6.
+As implemented, each session uses the highest version both sides support and the intersection of the capabilities both advertised. A capability only one side knows is dropped, not an error. If the version ranges don't overlap, the connection is refused with `UNSUPPORTED_VERSION`. Capabilities are advertised only once the service behind them exists: `text` so far.
 
 ## 9.1 Error protocol
 

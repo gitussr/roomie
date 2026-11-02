@@ -77,8 +77,8 @@ public static class RmpMessagePolicy
 
         // A chat body is limited after decoding, by ContentPayloads, not by its escaped size on the wire.
         new(RmpMessageTypes.ChatMessage, Frame, RequiredCapability: RmpCapabilities.Text, Validate: ContentPayloads.CheckChatMessage),
-        new(RmpMessageTypes.MessageAck, Small, RequiredCapability: RmpCapabilities.Text),
-        new(RmpMessageTypes.MessageRead, Small, RequiredCapability: RmpCapabilities.Text),
+        new(RmpMessageTypes.MessageAck, Small, RequiredCapability: RmpCapabilities.Text, Validate: ContentPayloads.CheckMessageAck),
+        new(RmpMessageTypes.MessageRead, Small, RequiredCapability: RmpCapabilities.Text, Validate: ContentPayloads.CheckMessageRead),
 
         new(RmpMessageTypes.GroupCreate, Metadata, RequiredCapability: RmpCapabilities.Groups),
         new(RmpMessageTypes.GroupInvite, Metadata, RequiredCapability: RmpCapabilities.Groups),

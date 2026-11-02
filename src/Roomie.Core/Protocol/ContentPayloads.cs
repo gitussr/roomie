@@ -44,9 +44,45 @@ public sealed record FileOfferPayload(
     string Sha256,
     string ContentType);
 
+/// <summary><c>MESSAGE_ACK</c>: the recipient has stored this message.</summary>
+public sealed record MessageAckPayload(Guid MessageId);
+
+/// <summary><c>MESSAGE_READ</c>: the recipient's user read these messages.</summary>
+public sealed record MessageReadPayload(IReadOnlyList<Guid> MessageIds);
+
 /// <summary>Strict parsing and limits for message content.</summary>
 public static class ContentPayloads
 {
+    /// <summary>How many messages one <c>MESSAGE_READ</c> may cover; more take several.</summary>
+    public const int MaxReadReceiptsPerMessage = 20;
+
+    /// <summary>Removes what a chat body may not contain, and surrounding whitespace.</summary>
+    public static string NormalizeText(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        return string.Concat(text.Where(ch => !IsForbiddenInText(ch))).Trim();
+    }
+
+    public static RmpPayloadCheck CheckMessageAck(JsonElement payload) => Read<MessageAckPayload>(payload, Check, out _);
+
+    public static RmpPayloadCheck CheckMessageRead(JsonElement payload) => Read<MessageReadPayload>(payload, Check, out _);
+
+    public static bool TryReadMessageAck(JsonElement payload, [NotNullWhen(true)] out MessageAckPayload? ack) =>
+        Read(payload, Check, out ack) == RmpPayloadCheck.Valid;
+
+    public static bool TryReadMessageRead(JsonElement payload, [NotNullWhen(true)] out MessageReadPayload? read) =>
+        Read(payload, Check, out read) == RmpPayloadCheck.Valid;
+
+    private static RmpPayloadCheck Check(MessageAckPayload ack) =>
+        ack.MessageId != Guid.Empty ? RmpPayloadCheck.Valid : RmpPayloadCheck.Malformed;
+
+    private static RmpPayloadCheck Check(MessageReadPayload read) =>
+        read.MessageIds.Count is > 0 and <= MaxReadReceiptsPerMessage && !read.MessageIds.Contains(Guid.Empty)
+            ? RmpPayloadCheck.Valid
+            : RmpPayloadCheck.Malformed;
+
+    private static bool IsForbiddenInText(char ch) => char.IsControl(ch) && ch is not ('\t' or '\r' or '\n');
+
     public static bool TryReadChatMessage(JsonElement payload, [NotNullWhen(true)] out ChatMessagePayload? message) =>
         Read(payload, Check, out message) == RmpPayloadCheck.Valid;
 
@@ -87,7 +123,7 @@ public static class ContentPayloads
         var valid = IsIdentifier(message.ConversationId)
             && message.ContentType == RmpContentTypes.Text
             && message.Content.Length > 0
-            && !message.Content.Any(ch => char.IsControl(ch) && ch is not ('\t' or '\r' or '\n'))
+            && !message.Content.Any(IsForbiddenInText)
             && (message.GroupId is null) == (message.MembershipVersion is null)
             && (message.GroupId is null || IsIdentifier(message.GroupId))
             && message.MembershipVersion is null or >= 1;

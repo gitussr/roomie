@@ -9,7 +9,7 @@ public sealed class ConnectionOptions
 
     public string AppVersion { get; init; } = "0.0.0";
 
-    /// <summary>Optional features advertised in HELLO. None yet; messaging adds <c>text</c> in phase 6.</summary>
+    /// <summary>Optional features advertised in HELLO. List one only when the service behind it is running.</summary>
     public IReadOnlyList<string> Capabilities { get; init; } = [];
 
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(5);

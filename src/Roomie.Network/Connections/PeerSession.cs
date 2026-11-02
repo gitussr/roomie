@@ -148,13 +148,23 @@ public sealed partial class PeerSession : IAsyncDisposable
     /// <exception cref="InvalidOperationException">The session is closed, or the message isn't allowed on it.</exception>
     public async Task SendAsync(string type, JsonElement payload, CancellationToken cancellationToken = default)
     {
+        var now = _time.GetUtcNow();
+        await SendAsync(type, payload, Guid.CreateVersion7(now), now, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a message under an ID and timestamp chosen by the caller. A retry must reuse both: the ID is how
+    /// the recipient recognizes a message it already has (architecture.md §6).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The session is closed, or the message isn't allowed on it.</exception>
+    public async Task SendAsync(string type, JsonElement payload, Guid messageId, DateTimeOffset timestamp, CancellationToken cancellationToken = default)
+    {
         if (RmpMessagePolicy.Check(type, payload, IsTrusted, Capabilities) is { } refused)
         {
             throw new InvalidOperationException($"{type} can't be sent on this session: {refused.Message}");
         }
 
-        var envelope = RmpEnvelope.Create(type, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), payload);
-        await WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
+        await WriteAsync(new RmpEnvelope(type, messageId, LocalDeviceId, RemoteDeviceId, timestamp, payload), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Closes the session, first telling the peer why when <paramref name="goodbyeReason"/> is given.</summary>
