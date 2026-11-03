@@ -1,0 +1,74 @@
+<UserControl x:Class="Roomie.App.Views.DevicesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Roomie.App.ViewModels">
+    <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Margin="24,20,24,8">
+            <TextBlock Text="Devices" Style="{StaticResource HeadingText}" />
+            <TextBlock Margin="0,4,0,0" Style="{StaticResource MutedText}"
+                       Text="Computers running Roomie on this network. Names are chosen by each device and aren't verified until you pair." />
+            <TextBlock Margin="0,8,0,0" Text="{Binding DiscoveryProblem}" Style="{StaticResource ProblemText}" />
+            <TextBlock Margin="0,8,0,0" Text="{Binding EmptyListHint}" Style="{StaticResource MutedWhenEmpty}" />
+        </StackPanel>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <ItemsControl Margin="24,0,24,16" ItemsSource="{Binding NearbyDevices}" Focusable="False" AutomationProperties.Name="Devices">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="{x:Type vm:NearbyDevice}">
+                        <Border Margin="0,0,0,8" Padding="14,10" CornerRadius="6" Background="{DynamicResource SubtleBrush}">
+                            <StackPanel>
+                                <TextBlock Text="{Binding Username}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Style="{StaticResource MutedText}" FontFamily="Consolas" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                                    <Run Text="{Binding DisplayId, Mode=OneWay}" />
+                                    <Run Text="·" />
+                                    <Run Text="{Binding Address, Mode=OneWay}" />
+                                </TextBlock>
+                                <TextBlock Text="{Binding Details}" Style="{StaticResource MutedWhenEmpty}" />
+                                <TextBlock Margin="0,3,0,0" Text="{Binding Connection}" FontSize="12" TextWrapping="Wrap" />
+                                <TextBlock Text="{Binding Problem}" FontSize="12" Style="{StaticResource ProblemText}" />
+                                <WrapPanel Margin="0,8,0,0">
+                                    <WrapPanel.Resources>
+                                        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                            <Setter Property="Margin" Value="0,0,6,0" />
+                                            <Setter Property="Padding" Value="12,3" />
+                                        </Style>
+                                    </WrapPanel.Resources>
+                                    <Button Content="Chat" Style="{StaticResource PrimaryButton}" Margin="0,0,6,0" Padding="12,3"
+                                            Command="{Binding DataContext.OpenChatCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanChat, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Chat with {0}'}" />
+                                    <Button Content="Pair…"
+                                            Command="{Binding DataContext.PairCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanPair, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Pair with {0}'}" />
+                                    <Button Content="Connect"
+                                            Command="{Binding DataContext.ConnectCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanConnect, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Connect to {0}'}" />
+                                    <Button Content="Disconnect"
+                                            Command="{Binding DataContext.DisconnectCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanDisconnect, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Disconnect from {0}'}" />
+                                    <Button Content="Forget…"
+                                            Command="{Binding DataContext.ForgetCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanForget, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Forget {0}'}" />
+                                    <Button Content="Unblock"
+                                            Command="{Binding DataContext.UnblockCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanUnblock, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Unblock {0}'}" />
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+    </DockPanel>
+</UserControl>

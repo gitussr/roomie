@@ -4,580 +4,101 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:Roomie.App.ViewModels"
+        xmlns:views="clr-namespace:Roomie.App.Views"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
         Title="{Binding WindowTitle}"
         Icon="/Assets/roomie.ico"
-        Height="600" Width="960" MinHeight="400" MinWidth="640"
+        Height="680" Width="1040" MinHeight="560" MinWidth="720"
+        Background="{DynamicResource WindowBrush}"
+        Foreground="{DynamicResource TextBrush}"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
-        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <views:SectionToCheckedConverter x:Key="SectionChecked" />
+        <views:SectionToVisibilityConverter x:Key="SectionVisible" />
+        <views:CountToVisibilityConverter x:Key="CountVisible" />
     </Window.Resources>
-    <DockPanel>
-        <StatusBar DockPanel.Dock="Bottom">
-            <StatusBarItem Content="{Binding Status}" />
-            <Separator />
-            <StatusBarItem Content="{Binding NetworkSummary}" />
-        </StatusBar>
+    <Window.TaskbarItemInfo>
+        <TaskbarItemInfo />
+    </Window.TaskbarItemInfo>
 
-        <Grid>
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="280" MinWidth="200" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="82" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
-            <DockPanel Grid.Column="0">
-                <Border DockPanel.Dock="Top" Padding="12" BorderBrush="LightGray" BorderThickness="0,0,0,1">
+        <!-- Navigation rail -->
+        <Border Grid.Row="0" Grid.RowSpan="2" Background="{DynamicResource RailBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,1,0">
+            <DockPanel>
+                <Image DockPanel.Dock="Top" Source="/Assets/roomie.png" Width="34" Height="34" Margin="0,14,0,12" AutomationProperties.Name="Roomie" />
+                <RadioButton DockPanel.Dock="Bottom" GroupName="Rail" Style="{StaticResource RailButton}" AutomationProperties.Name="Settings"
+                             Margin="6,3,6,8"
+                             IsChecked="{Binding Section, Converter={StaticResource SectionChecked}, ConverterParameter=Settings}">
                     <StackPanel>
-                        <TextBlock Text="{Binding Username}" FontSize="16" FontWeight="SemiBold"
-                                   TextTrimming="CharacterEllipsis" />
-                        <TextBlock Text="{Binding DisplayId}" Foreground="Gray" FontFamily="Consolas" />
-
-                        <DockPanel Margin="0,10,0,0">
-                            <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="10,2" Content="Rename"
-                                    Command="{Binding SaveUsernameCommand}" IsDefault="True" />
-                            <TextBox Text="{Binding UsernameDraft, UpdateSourceTrigger=PropertyChanged}"
-                                     MaxLength="32" VerticalContentAlignment="Center" AutomationProperties.Name="Username" />
-                        </DockPanel>
-                        <TextBlock Text="{Binding UsernameError}" Foreground="Firebrick" TextWrapping="Wrap">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <Trigger Property="Text" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                        <Trigger Property="Text" Value="{x:Null}">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-
-                        <Expander Margin="0,8,0,0" Header="Security fingerprint" Foreground="Gray">
-                            <TextBlock Margin="0,4,0,0" Text="{Binding Fingerprint}" FontFamily="Consolas"
-                                       TextWrapping="Wrap" Foreground="Gray" />
-                        </Expander>
+                        <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="20" HorizontalAlignment="Center" />
+                        <TextBlock Text="Settings" FontSize="11" Margin="0,4,0,0" HorizontalAlignment="Center" />
                     </StackPanel>
-                </Border>
-
-                <DockPanel Margin="12">
-                    <StackPanel DockPanel.Dock="Top">
-                        <TextBlock Text="Nearby devices" FontSize="18" FontWeight="SemiBold" />
-                        <TextBlock Margin="0,2,0,0" Foreground="Gray" TextWrapping="Wrap" FontSize="11"
-                                   Text="Names are chosen by each device and aren't verified until you pair." />
-                        <TextBlock Margin="0,8,0,0" Text="{Binding DiscoveryProblem}" Foreground="Firebrick"
-                                   TextWrapping="Wrap">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <Trigger Property="Text" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                        <Trigger Property="Text" Value="{x:Null}">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                        <TextBlock Margin="0,8,0,0" Text="{Binding EmptyListHint}" Foreground="Gray"
-                                   TextWrapping="Wrap">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <Trigger Property="Text" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                    </StackPanel>
-
-                    <!-- Groups: docked before the device list, which takes the space that's left. -->
-                    <Border DockPanel.Dock="Bottom" Margin="0,8,0,0" Padding="0,8,0,0" MaxHeight="240"
-                            BorderBrush="LightGray" BorderThickness="0,1,0,0">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                </RadioButton>
+                <StackPanel>
+                    <RadioButton GroupName="Rail" Style="{StaticResource RailButton}" AutomationProperties.Name="Chats"
+                                 IsChecked="{Binding Section, Converter={StaticResource SectionChecked}, ConverterParameter=Chats}">
+                        <Grid>
                             <StackPanel>
-                                <TextBlock Text="Groups" FontSize="18" FontWeight="SemiBold" />
-                                <ItemsControl ItemsSource="{Binding GroupInvites}" AutomationProperties.Name="Group invitations" Focusable="False">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate DataType="{x:Type vm:GroupInviteItem}">
-                                            <Border Margin="0,6,0,0" Padding="8,6" Background="#FFF6E0" CornerRadius="4">
-                                                <StackPanel>
-                                                    <TextBlock Text="{Binding GroupName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                                    <TextBlock Text="{Binding Details}" FontSize="11" TextWrapping="Wrap" />
-                                                    <WrapPanel Margin="0,4,0,0">
-                                                        <Button Content="Join" Padding="10,1" Margin="0,0,6,0" FontWeight="SemiBold"
-                                                                Command="{Binding DataContext.AcceptInviteCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                                CommandParameter="{Binding}"
-                                                                AutomationProperties.Name="{Binding GroupName, StringFormat='Join {0}'}" />
-                                                        <Button Content="Decline" Padding="10,1"
-                                                                Command="{Binding DataContext.DeclineInviteCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                                CommandParameter="{Binding}"
-                                                                AutomationProperties.Name="{Binding GroupName, StringFormat='Decline {0}'}" />
-                                                    </WrapPanel>
-                                                </StackPanel>
-                                            </Border>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                                <ItemsControl ItemsSource="{Binding Groups}" AutomationProperties.Name="Groups" Focusable="False">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate DataType="{x:Type vm:GroupItem}">
-                                            <DockPanel Margin="0,6,0,0">
-                                                <Button DockPanel.Dock="Right" Content="{Binding ChatLabel}" Padding="10,1" VerticalAlignment="Center"
-                                                        Command="{Binding DataContext.OpenGroupCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding GroupId}"
-                                                        AutomationProperties.Name="{Binding Name, StringFormat='Open group {0}'}" />
-                                                <StackPanel>
-                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                                    <TextBlock Text="{Binding Details}" Foreground="Gray" FontSize="11" />
-                                                </StackPanel>
-                                            </DockPanel>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                                <DockPanel Margin="0,8,0,0">
-                                    <Button DockPanel.Dock="Right" Margin="6,0,0,0" Padding="10,2" Content="New group"
-                                            Command="{Binding CreateGroupCommand}" />
-                                    <TextBox Text="{Binding NewGroupName, UpdateSourceTrigger=PropertyChanged}" MaxLength="64"
-                                             VerticalContentAlignment="Center" AutomationProperties.Name="New group name">
-                                        <TextBox.InputBindings>
-                                            <KeyBinding Key="Enter" Command="{Binding CreateGroupCommand}" />
-                                        </TextBox.InputBindings>
-                                    </TextBox>
-                                </DockPanel>
-                                <TextBlock Text="{Binding GroupError}" Foreground="Firebrick" FontSize="11" TextWrapping="Wrap">
-                                    <TextBlock.Style>
-                                        <Style TargetType="TextBlock">
-                                            <Style.Triggers>
-                                                <Trigger Property="Text" Value="{x:Null}">
-                                                    <Setter Property="Visibility" Value="Collapsed" />
-                                                </Trigger>
-                                                <Trigger Property="Text" Value="">
-                                                    <Setter Property="Visibility" Value="Collapsed" />
-                                                </Trigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </TextBlock.Style>
-                                </TextBlock>
+                                <TextBlock Text="&#xE8BD;" FontFamily="Segoe MDL2 Assets" FontSize="20" HorizontalAlignment="Center" />
+                                <TextBlock Text="Chats" FontSize="11" Margin="0,4,0,0" HorizontalAlignment="Center" />
                             </StackPanel>
-                        </ScrollViewer>
-                    </Border>
-
-                    <ListBox Margin="0,8,0,0" ItemsSource="{Binding NearbyDevices}" BorderThickness="0"
-                             HorizontalContentAlignment="Stretch"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             AutomationProperties.Name="Nearby devices">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate DataType="{x:Type vm:NearbyDevice}">
-                                <StackPanel Margin="0,4">
-                                    <TextBlock Text="{Binding Username}" FontWeight="SemiBold"
-                                               TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Foreground="Gray" FontFamily="Consolas" FontSize="11"
-                                               TextTrimming="CharacterEllipsis">
-                                        <Run Text="{Binding DisplayId, Mode=OneWay}" />
-                                        <Run Text="·" />
-                                        <Run Text="{Binding Address, Mode=OneWay}" />
-                                    </TextBlock>
-                                    <TextBlock Text="{Binding Details}" Foreground="Gray" FontSize="11" />
-                                    <TextBlock Margin="0,2,0,0" Text="{Binding Connection}" FontSize="11"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{Binding Problem}" Foreground="Firebrick" FontSize="11"
-                                               TextWrapping="Wrap">
-                                        <TextBlock.Style>
-                                            <Style TargetType="TextBlock">
-                                                <Style.Triggers>
-                                                    <Trigger Property="Text" Value="{x:Null}">
-                                                        <Setter Property="Visibility" Value="Collapsed" />
-                                                    </Trigger>
-                                                    <Trigger Property="Text" Value="">
-                                                        <Setter Property="Visibility" Value="Collapsed" />
-                                                    </Trigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </TextBlock.Style>
-                                    </TextBlock>
-                                    <WrapPanel Margin="0,4,0,0" Orientation="Horizontal">
-                                        <WrapPanel.Resources>
-                                            <Style TargetType="Button">
-                                                <Setter Property="Margin" Value="0,0,6,4" />
-                                            </Style>
-                                        </WrapPanel.Resources>
-                                        <Button Content="{Binding ChatLabel}" Padding="10,1" FontWeight="SemiBold"
-                                                Command="{Binding DataContext.OpenChatCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                                CommandParameter="{Binding DeviceId}"
-                                                Visibility="{Binding CanChat, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="{Binding Username, StringFormat='Chat with {0}'}" />
-                                        <Button Content="Pair…" Padding="10,1"
-                                                Command="{Binding DataContext.PairCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                                CommandParameter="{Binding DeviceId}"
-                                                Visibility="{Binding CanPair, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="{Binding Username, StringFormat='Pair with {0}'}" />
-                                        <Button Content="Connect" Padding="10,1"
-                                                Command="{Binding DataContext.ConnectCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                                CommandParameter="{Binding DeviceId}"
-                                                Visibility="{Binding CanConnect, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="{Binding Username, StringFormat='Connect to {0}'}" />
-                                        <Button Content="Disconnect" Padding="10,1"
-                                                Command="{Binding DataContext.DisconnectCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                                CommandParameter="{Binding DeviceId}"
-                                                Visibility="{Binding CanDisconnect, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="{Binding Username, StringFormat='Disconnect from {0}'}" />
-                                        <Button Content="Forget…" Padding="10,1"
-                                                Command="{Binding DataContext.ForgetCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                                CommandParameter="{Binding DeviceId}"
-                                                Visibility="{Binding CanForget, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="{Binding Username, StringFormat='Forget {0}'}" />
-                                        <Button Content="Unblock" Padding="10,1"
-                                                Command="{Binding DataContext.UnblockCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
-                                                CommandParameter="{Binding DeviceId}"
-                                                Visibility="{Binding CanUnblock, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="{Binding Username, StringFormat='Unblock {0}'}" />
-                                    </WrapPanel>
-                                </StackPanel>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </DockPanel>
-            </DockPanel>
-
-            <GridSplitter Grid.Column="1" Width="1" HorizontalAlignment="Stretch" Background="LightGray" />
-
-            <!-- Pairing panel: shown while a pairing is in progress or its result hasn't been dismissed. -->
-            <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" DataContext="{Binding Pairing}"
-                          Visibility="{Binding IsVisible, Converter={StaticResource BoolToVisibility}}">
-                <StackPanel MaxWidth="460" Margin="24" VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <TextBlock Text="{Binding Title}" FontSize="22" FontWeight="SemiBold" TextAlignment="Center"
-                               TextWrapping="Wrap" />
-
-                    <Border Margin="0,20,0,0" Padding="24,12" HorizontalAlignment="Center" CornerRadius="6"
-                            Background="#F3F3F3" BorderBrush="#D0D0D0" BorderThickness="1"
-                            Visibility="{Binding HasCode, Converter={StaticResource BoolToVisibility}}">
-                        <TextBlock Text="{Binding Code}" FontSize="44" FontFamily="Consolas" FontWeight="SemiBold"
-                                   AutomationProperties.Name="Verification code" />
-                    </Border>
-
-                    <TextBlock Margin="0,16,0,0" Text="{Binding Instruction}" TextWrapping="Wrap" TextAlignment="Center">
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsProblem}" Value="True">
-                                        <Setter Property="Foreground" Value="Firebrick" />
-                                    </DataTrigger>
-                                    <DataTrigger Binding="{Binding IsSuccess}" Value="True">
-                                        <Setter Property="Foreground" Value="ForestGreen" />
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-
-                    <WrapPanel Margin="0,20,0,0" HorizontalAlignment="Center">
-                        <WrapPanel.Resources>
-                            <Style TargetType="Button">
-                                <Setter Property="Margin" Value="4" />
-                                <Setter Property="Padding" Value="14,4" />
-                            </Style>
-                        </WrapPanel.Resources>
-                        <Button Content="The codes match" Command="{Binding ApproveCommand}" IsDefault="True"
-                                FontWeight="SemiBold"
-                                Visibility="{Binding CanApprove, Converter={StaticResource BoolToVisibility}}" />
-                        <Button Content="{Binding CancelLabel}" Command="{Binding CancelCommand}"
-                                Visibility="{Binding CanCancel, Converter={StaticResource BoolToVisibility}}" />
-                        <Button Content="Block this device" Command="{Binding BlockCommand}"
-                                Visibility="{Binding CanBlock, Converter={StaticResource BoolToVisibility}}" />
-                        <Button Content="Close" Command="{Binding DismissCommand}"
-                                Visibility="{Binding CanDismiss, Converter={StaticResource BoolToVisibility}}" />
-                    </WrapPanel>
-
-                    <Expander Margin="0,20,0,0" Header="Compare full fingerprints" Foreground="Gray"
-                              Visibility="{Binding HasCode, Converter={StaticResource BoolToVisibility}}">
-                        <StackPanel Margin="0,6,0,0">
-                            <TextBlock Foreground="Gray" TextWrapping="Wrap" FontSize="11"
-                                       Text="For extra assurance, read these out and check each one against the Security fingerprint shown on that computer." />
-                            <TextBlock Margin="0,8,0,0" Text="This computer" FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding LocalFingerprint}" FontFamily="Consolas" TextWrapping="Wrap" />
-                            <TextBlock Margin="0,8,0,0" Text="{Binding RemoteLabel}" FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding RemoteFingerprint}" FontFamily="Consolas" TextWrapping="Wrap" />
-                        </StackPanel>
-                    </Expander>
-                </StackPanel>
-            </ScrollViewer>
-
-            <!-- Conversation panel. -->
-            <DockPanel Grid.Column="2" Visibility="{Binding IsChatVisible, Converter={StaticResource BoolToVisibility}}">
-                <Border DockPanel.Dock="Top" Padding="16,10" BorderBrush="LightGray" BorderThickness="0,0,0,1">
-                    <DockPanel>
-                        <Button DockPanel.Dock="Right" VerticalAlignment="Center" Padding="10,2" Content="Close"
-                                Command="{Binding CloseChatCommand}" AutomationProperties.Name="Close conversation" />
+                            <Border Style="{StaticResource Badge}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-6,-12,0"
+                                    Visibility="{Binding TotalUnread, Converter={StaticResource CountVisible}}">
+                                <TextBlock Text="{Binding TotalUnread}" Style="{StaticResource BadgeText}" AutomationProperties.Name="{Binding TotalUnread, StringFormat='{}{0} unread'}" />
+                            </Border>
+                        </Grid>
+                    </RadioButton>
+                    <RadioButton GroupName="Rail" Style="{StaticResource RailButton}" AutomationProperties.Name="Devices"
+                                 IsChecked="{Binding Section, Converter={StaticResource SectionChecked}, ConverterParameter=Devices}">
                         <StackPanel>
-                            <TextBlock Text="{Binding Chat.PeerName}" FontSize="16" FontWeight="SemiBold"
-                                       TextTrimming="CharacterEllipsis" />
-                            <TextBlock Foreground="Gray" FontSize="11" TextWrapping="Wrap">
-                                <Run Text="{Binding Chat.PeerDisplayId, Mode=OneWay}" FontFamily="Consolas" />
-                                <Run Text="·" />
-                                <Run Text="{Binding Chat.Connection, Mode=OneWay}" />
-                            </TextBlock>
+                            <TextBlock Text="&#xE772;" FontFamily="Segoe MDL2 Assets" FontSize="20" HorizontalAlignment="Center" />
+                            <TextBlock Text="Devices" FontSize="11" Margin="0,4,0,0" HorizontalAlignment="Center" />
                         </StackPanel>
-                    </DockPanel>
-                </Border>
-
-                <!-- Files with this device. Open by default, because an offer needs an answer. -->
-                <Expander DockPanel.Dock="Top" Margin="16,6" Header="{Binding Chat.FilesTitle}" IsExpanded="True"
-                          Visibility="{Binding Chat.HasFiles, Converter={StaticResource BoolToVisibility}}">
-                    <ScrollViewer MaxHeight="200" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <ItemsControl ItemsSource="{Binding Chat.Files}" Focusable="False" AutomationProperties.Name="Files">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate DataType="{x:Type vm:FileTransferItem}">
-                                    <Border Margin="0,4,0,0" Padding="8,6" Background="#F7F7F7" CornerRadius="4">
-                                        <StackPanel>
-                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" />
-                                            <TextBlock Text="{Binding Status}" FontSize="11" TextWrapping="Wrap">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Setter Property="Foreground" Value="#606060" />
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding IsProblem}" Value="True">
-                                                                <Setter Property="Foreground" Value="Firebrick" />
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                            </TextBlock>
-                                            <TextBlock Text="{Binding Warning}" Foreground="Firebrick" FontSize="11" TextWrapping="Wrap">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Style.Triggers>
-                                                            <Trigger Property="Text" Value="{x:Null}">
-                                                                <Setter Property="Visibility" Value="Collapsed" />
-                                                            </Trigger>
-                                                            <Trigger Property="Text" Value="">
-                                                                <Setter Property="Visibility" Value="Collapsed" />
-                                                            </Trigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                            </TextBlock>
-                                            <ProgressBar Margin="0,4,0,0" Height="6" Maximum="100" Value="{Binding Percent, Mode=OneWay}"
-                                                         Visibility="{Binding IsMoving, Converter={StaticResource BoolToVisibility}}"
-                                                         AutomationProperties.Name="{Binding Name, StringFormat='Progress of {0}'}" />
-                                            <WrapPanel Margin="0,4,0,0">
-                                                <WrapPanel.Resources>
-                                                    <Style TargetType="Button">
-                                                        <Setter Property="Margin" Value="0,0,6,0" />
-                                                        <Setter Property="Padding" Value="10,1" />
-                                                    </Style>
-                                                </WrapPanel.Resources>
-                                                <Button Content="Accept" FontWeight="SemiBold"
-                                                        Command="{Binding DataContext.Chat.AcceptFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding}"
-                                                        Visibility="{Binding CanAnswer, Converter={StaticResource BoolToVisibility}}"
-                                                        AutomationProperties.Name="{Binding Name, StringFormat='Accept {0}'}" />
-                                                <Button Content="Decline"
-                                                        Command="{Binding DataContext.Chat.DeclineFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding}"
-                                                        Visibility="{Binding CanAnswer, Converter={StaticResource BoolToVisibility}}"
-                                                        AutomationProperties.Name="{Binding Name, StringFormat='Decline {0}'}" />
-                                                <Button Content="Cancel"
-                                                        Command="{Binding DataContext.Chat.CancelFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding}"
-                                                        Visibility="{Binding CanCancel, Converter={StaticResource BoolToVisibility}}"
-                                                        AutomationProperties.Name="{Binding Name, StringFormat='Cancel {0}'}" />
-                                                <Button Content="Show in folder"
-                                                        Command="{Binding DataContext.Chat.ShowFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding}"
-                                                        Visibility="{Binding CanShow, Converter={StaticResource BoolToVisibility}}"
-                                                        AutomationProperties.Name="{Binding Name, StringFormat='Show {0} in folder'}" />
-                                                <Button Content="Send again"
-                                                        Command="{Binding DataContext.Chat.SendFileAgainCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding}"
-                                                        Visibility="{Binding CanSendAgain, Converter={StaticResource BoolToVisibility}}"
-                                                        AutomationProperties.Name="{Binding Name, StringFormat='Send {0} again'}" />
-                                            </WrapPanel>
-                                        </StackPanel>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-                </Expander>
-
-                <!-- Who is in the open group, and for its owner, who can be invited. -->
-                <Expander DockPanel.Dock="Top" Margin="16,6" Header="{Binding Chat.MembersTitle}"
-                          Visibility="{Binding Chat.IsGroup, Converter={StaticResource BoolToVisibility}}">
-                    <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel Margin="0,4,0,0">
-                            <ItemsControl ItemsSource="{Binding Chat.Members}" Focusable="False" AutomationProperties.Name="Members">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate DataType="{x:Type vm:GroupMemberItem}">
-                                        <DockPanel Margin="0,2">
-                                            <Button DockPanel.Dock="Right" Content="Remove" Padding="10,1"
-                                                    Command="{Binding DataContext.Chat.RemoveMemberCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                    CommandParameter="{Binding DeviceId}"
-                                                    Visibility="{Binding CanRemove, Converter={StaticResource BoolToVisibility}}"
-                                                    AutomationProperties.Name="{Binding Name, StringFormat='Remove {0}'}" />
-                                            <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
-                                                <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold" />
-                                                <Run Text="{Binding Status, Mode=OneWay}" Foreground="Gray" FontSize="11" />
-                                            </TextBlock>
-                                        </DockPanel>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                            <ItemsControl ItemsSource="{Binding Chat.InviteCandidates}" Focusable="False" AutomationProperties.Name="Devices you can invite">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate DataType="{x:Type vm:GroupInviteCandidate}">
-                                        <DockPanel Margin="0,2">
-                                            <Button DockPanel.Dock="Right" Content="Invite" Padding="10,1"
-                                                    Command="{Binding DataContext.Chat.InviteCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                    CommandParameter="{Binding DeviceId}"
-                                                    AutomationProperties.Name="{Binding Name, StringFormat='Invite {0}'}" />
-                                            <TextBlock TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
-                                                <Run Text="{Binding Name, Mode=OneWay}" />
-                                                <Run Text="Paired, not in this group" Foreground="Gray" FontSize="11" />
-                                            </TextBlock>
-                                        </DockPanel>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
-                        </StackPanel>
-                    </ScrollViewer>
-                </Expander>
-
-                <Border DockPanel.Dock="Bottom" Padding="12" BorderBrush="LightGray" BorderThickness="0,1,0,0">
-                    <StackPanel>
-                        <TextBlock Margin="0,0,0,6" Text="{Binding Chat.Problem}" Foreground="Firebrick" TextWrapping="Wrap">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <Trigger Property="Text" Value="{x:Null}">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                        <Trigger Property="Text" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                        <TextBlock Margin="0,0,0,6" Text="{Binding Chat.SendError}" Foreground="Firebrick" TextWrapping="Wrap">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <Trigger Property="Text" Value="{x:Null}">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                        <Trigger Property="Text" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                        </Trigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
-                        <DockPanel>
-                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="16,4" VerticalAlignment="Bottom"
-                                    Content="Send" FontWeight="SemiBold" Command="{Binding Chat.SendCommand}" />
-                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="10,4" VerticalAlignment="Bottom"
-                                    Command="{Binding Chat.SendFileCommand}"
-                                    Visibility="{Binding Chat.IsDirect, Converter={StaticResource BoolToVisibility}}">
-                                <!-- Hashing a file of several GB takes a while before the offer appears. -->
-                                <Button.Style>
-                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-                                        <Setter Property="Content" Value="Send file…" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding Chat.IsPreparingFile}" Value="True">
-                                                <Setter Property="Content" Value="Checking file…" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Button.Style>
-                            </Button>
-                            <TextBox x:Name="Composer" Text="{Binding Chat.Draft, UpdateSourceTrigger=PropertyChanged}"
-                                     IsEnabled="{Binding Chat.CanCompose}" AcceptsReturn="True" TextWrapping="Wrap"
-                                     MaxHeight="120" MinHeight="28" Padding="4" VerticalContentAlignment="Center"
-                                     VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Message">
-                                <TextBox.InputBindings>
-                                    <KeyBinding Key="Enter" Command="{Binding Chat.SendCommand}" />
-                                </TextBox.InputBindings>
-                            </TextBox>
-                        </DockPanel>
-                        <TextBlock Margin="0,6,0,0" Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                                   Text="Enter sends, Shift+Enter starts a new line. Messages are saved on this computer." />
-                    </StackPanel>
-                </Border>
-
-                <ScrollViewer x:Name="MessageScroller" VerticalScrollBarVisibility="Auto" Padding="16,8">
-                    <StackPanel>
-                    <TextBlock Margin="0,0,0,8" HorizontalAlignment="Center" Foreground="Gray" FontSize="11"
-                               Text="Showing the latest 500 messages. Older ones are saved on this computer."
-                               Visibility="{Binding Chat.HasOlderMessages, Converter={StaticResource BoolToVisibility}}" />
-                    <ItemsControl ItemsSource="{Binding Chat.Messages}" Focusable="False" AutomationProperties.Name="Messages">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate DataType="{x:Type vm:ChatBubble}">
-                                <Border Margin="0,4" Padding="10,6" MaxWidth="480" CornerRadius="6">
-                                    <Border.Style>
-                                        <Style TargetType="Border">
-                                            <Setter Property="HorizontalAlignment" Value="Left" />
-                                            <Setter Property="Background" Value="#F3F3F3" />
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsMine}" Value="True">
-                                                    <Setter Property="HorizontalAlignment" Value="Right" />
-                                                    <Setter Property="Background" Value="#DCEBFA" />
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Border.Style>
-                                    <StackPanel>
-                                        <TextBlock Margin="0,0,0,2" Text="{Binding Sender}" FontSize="11" FontWeight="SemiBold">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Style.Triggers>
-                                                        <Trigger Property="Text" Value="{x:Null}">
-                                                            <Setter Property="Visibility" Value="Collapsed" />
-                                                        </Trigger>
-                                                        <Trigger Property="Text" Value="">
-                                                            <Setter Property="Visibility" Value="Collapsed" />
-                                                        </Trigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                        <!-- A read-only box, so people can select and copy. Text is only ever shown as text. -->
-                                        <TextBox Text="{Binding Text, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
-                                                 BorderThickness="0" Background="Transparent" Padding="0" />
-                                        <TextBlock Margin="0,3,0,0" FontSize="10" Foreground="#606060" TextWrapping="Wrap">
-                                            <Run Text="{Binding Time, Mode=OneWay}" />
-                                            <Run Text="{Binding Status, Mode=OneWay}" />
-                                        </TextBlock>
-                                    </StackPanel>
-                                </Border>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    </StackPanel>
-                </ScrollViewer>
+                    </RadioButton>
+                    <RadioButton GroupName="Rail" Style="{StaticResource RailButton}" AutomationProperties.Name="Transfers"
+                                 IsChecked="{Binding Section, Converter={StaticResource SectionChecked}, ConverterParameter=Transfers}">
+                        <Grid>
+                            <StackPanel>
+                                <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="20" HorizontalAlignment="Center" />
+                                <TextBlock Text="Transfers" FontSize="11" Margin="0,4,0,0" HorizontalAlignment="Center" />
+                            </StackPanel>
+                            <Border Style="{StaticResource Badge}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-6,-12,0"
+                                    Visibility="{Binding TransfersNeedingAttention, Converter={StaticResource CountVisible}}">
+                                <TextBlock Text="{Binding TransfersNeedingAttention}" Style="{StaticResource BadgeText}" />
+                            </Border>
+                        </Grid>
+                    </RadioButton>
+                </StackPanel>
             </DockPanel>
+        </Border>
 
-            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center"
-                        Visibility="{Binding IsWelcomeVisible, Converter={StaticResource BoolToVisibility}}">
-                <Image Source="/Assets/roomie.png" Width="96" Height="96" Margin="0,0,0,12"
-                       HorizontalAlignment="Center" AutomationProperties.Name="Roomie logo" />
-                <TextBlock Text="{Binding Title}" FontSize="28" FontWeight="SemiBold"
-                           HorizontalAlignment="Center" />
-                <TextBlock Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="Gray" TextAlignment="Center"
-                           TextWrapping="Wrap" MaxWidth="360"
-                           Text="Choose Pair… next to a nearby device to connect it securely with this computer, then Chat to send it a message." />
-                <TextBlock Margin="0,4,0,0" HorizontalAlignment="Center" Foreground="Gray">
-                    <Run Text="Version" />
-                    <Run Text="{Binding AppVersion, Mode=OneWay}" />
-                </TextBlock>
-                <TextBlock Margin="0,16,0,0" HorizontalAlignment="Center" Foreground="Gray"
-                           Text="{Binding DataDirectory, StringFormat='Data: {0}'}" />
-            </StackPanel>
-        </Grid>
-    </DockPanel>
+        <!-- Screens. They stay loaded, so a draft or a scroll position survives moving between them. -->
+        <views:ChatsView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Chats}" />
+        <views:DevicesView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Devices}" />
+        <views:TransfersView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Transfers}" />
+        <views:SettingsView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Settings}" />
+
+        <!-- Pairing covers every screen: it has a time limit and needs an answer. -->
+        <Border Grid.Column="1" Background="{DynamicResource ScrimBrush}"
+                Visibility="{Binding Pairing.IsVisible, Converter={StaticResource BoolToVisibility}}">
+            <views:PairingView DataContext="{Binding Pairing}" />
+        </Border>
+
+        <Border Grid.Column="1" Grid.Row="1" Padding="14,5" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Right" Text="{Binding OnlineSummary}" Style="{StaticResource MutedText}" Margin="14,0,0,0" />
+                <TextBlock Text="{Binding Status}" Style="{StaticResource MutedText}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+            </DockPanel>
+        </Border>
+    </Grid>
 </Window>

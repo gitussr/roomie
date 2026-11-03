@@ -1,12 +1,14 @@
 ﻿using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Roomie.App.Services;
 using Roomie.App.ViewModels;
 using Roomie.App.Views;
 using Roomie.Core.Configuration;
@@ -32,6 +34,7 @@ using ILogger = Microsoft.Extensions.Logging.ILogger;
 
 namespace Roomie.App;
 
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1001", Justification = "An Application ends in OnExit, which disposes these.")]
 public partial class App : Application
 {
     internal static string AppVersion { get; } =
@@ -39,12 +42,22 @@ public partial class App : Application
 
     private IHost? _host;
     private ILogger _logger = NullLogger.Instance;
+    private TrayIcon? _tray;
+    private Mutex? _singleInstance;
+    private EventWaitHandle? _showRequest;
+    private RegisteredWaitHandle? _showRequestWait;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
         var paths = AppPaths.CreateDefault();
+        if (!TakeSingleInstance(paths))
+        {
+            Shutdown(0);
+            return;
+        }
+
         paths.EnsureCreated();
 
         JsonTrustStore trust;
@@ -65,7 +78,12 @@ public partial class App : Application
             return;
         }
 
-        _host = Host.CreateDefaultBuilder(e.Args)
+        var settings = new JsonSettingsStore(paths.SettingsFile);
+        var theme = new ThemeService(this);
+        theme.Apply(settings.Current.Theme);
+
+        // The command line is Roomie's own, so nothing on it is host configuration.
+        _host = Host.CreateDefaultBuilder([])
             .UseSerilog((_, logger) => logger
                 .MinimumLevel.Information()
                 .WriteTo.File(
@@ -79,6 +97,8 @@ public partial class App : Application
             {
                 services.Configure<ConsoleLifetimeOptions>(options => options.SuppressStatusMessages = true);
                 services.AddSingleton(paths);
+                services.AddSingleton(settings);
+                services.AddSingleton(theme);
                 services.AddSingleton(TimeProvider.System);
                 services.AddSingleton(_ => new DeviceIdentityStore(paths.Identity));
                 services.AddSingleton<ILocalIdentityProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
@@ -109,11 +129,13 @@ public partial class App : Application
                 services.AddHostedService(sp => sp.GetRequiredService<MessagingService>());
 
                 services.AddSingleton<IFileTransferStore>(sp => sp.GetRequiredService<SqliteMessageStore>());
-                services.AddSingleton(new FileTransferOptions { DownloadsDirectory = paths.Downloads, IncomingDirectory = paths.Incoming });
+                services.AddSingleton(new FileTransferOptions { DownloadsDirectory = paths.Downloads, IncomingDirectory = paths.Incoming, ReceiveFolder = settings.Current.ReceiveFolder ?? WindowsFolders.Downloads() });
                 services.AddSingleton<FileTransferService>();
                 services.AddHostedService(sp => sp.GetRequiredService<FileTransferService>());
 
+                services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainViewModel>();
+                services.AddSingleton<NotificationCenter>();
                 services.AddSingleton<MainWindow>();
             })
             .Build();
@@ -143,12 +165,112 @@ public partial class App : Application
 
         await _host.StartAsync();
 
-        MainWindow = _host.Services.GetRequiredService<MainWindow>();
-        MainWindow.Show();
+        // A portable copy may have moved since this was turned on.
+        if (settings.Current.StartWithWindows)
+        {
+            StartupRegistration.Apply(true);
+        }
+
+        var window = _host.Services.GetRequiredService<MainWindow>();
+        MainWindow = window;
+        StartTray(window, _host.Services);
+        ListenForShowRequests(window);
+
+        // Started by Windows at sign-in: stay in the notification area until wanted.
+        if (!e.Args.Contains(StartupRegistration.BackgroundArgument))
+        {
+            window.Show();
+        }
+    }
+
+    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+    {
+        ArgumentNullException.ThrowIfNull(e);
+        base.OnSessionEnding(e);
+        ExitRoomie();
+    }
+
+    private void StartTray(MainWindow window, IServiceProvider services)
+    {
+        var tray = new TrayIcon();
+        _tray = tray;
+        var main = services.GetRequiredService<MainViewModel>();
+
+        tray.OpenRequested += (_, _) => window.ShowFromTray();
+        tray.ExitRequested += (_, _) => ExitRoomie();
+        tray.NotificationOpened += (_, target) =>
+        {
+            main.Open(target);
+            window.ShowFromTray();
+        };
+
+        window.HiddenToTrayFirstTime += (_, _) => tray.Notify("Roomie is still running", "Messages and files will keep arriving. Use this icon to open or exit Roomie.", null);
+
+        var notifications = services.GetRequiredService<NotificationCenter>();
+        notifications.Notify += (_, shown) => tray.Notify(shown.Title, shown.Body, shown.Target);
+        notifications.AttentionNeeded += (_, _) => window.Flash();
+
+        main.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainViewModel.WindowTitle))
+            {
+                tray.SetTooltip(main.WindowTitle);
+            }
+        };
+    }
+
+    private void ExitRoomie()
+    {
+        if (MainWindow is MainWindow window)
+        {
+            window.IsExiting = true;
+            window.Close();
+        }
+
+        // Also when the window was never shown, because Roomie started in the background.
+        Shutdown();
+    }
+
+    /// <summary>
+    /// Only one Roomie can own a data folder and its ports. A second launch asks the first to show itself and leaves,
+    /// which is what someone who can't see the window because it's in the notification area wants anyway.
+    /// </summary>
+    private bool TakeSingleInstance(AppPaths paths)
+    {
+        var key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(paths.Root.ToUpperInvariant())))[..16];
+        _showRequest = new EventWaitHandle(false, EventResetMode.AutoReset, $@"Local\Roomie-show-{key}");
+        _singleInstance = new Mutex(true, $@"Local\Roomie-{key}", out var isFirst);
+        if (!isFirst)
+        {
+            _showRequest.Set();
+            _showRequest.Dispose();
+            _showRequest = null;
+            _singleInstance.Dispose();
+            _singleInstance = null;
+        }
+
+        return isFirst;
+    }
+
+    private void ListenForShowRequests(MainWindow window)
+    {
+        if (_showRequest is { } request)
+        {
+            _showRequestWait = ThreadPool.RegisterWaitForSingleObject(
+                request,
+                (_, _) => Dispatcher.BeginInvoke(window.ShowFromTray),
+                null,
+                Timeout.Infinite,
+                executeOnlyOnce: false);
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _tray?.Dispose();
+        _showRequestWait?.Unregister(null);
+        _showRequest?.Dispose();
+
         if (_host is { } host)
         {
             // This has to finish before returning, because the process ends soon after: nothing awaited here
@@ -166,6 +288,9 @@ public partial class App : Application
             host.Dispose();
         }
 
+        // Last, so a new Roomie can't start while this one still has the database open.
+        _singleInstance?.ReleaseMutex();
+        _singleInstance?.Dispose();
         base.OnExit(e);
     }
 

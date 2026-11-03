@@ -13,7 +13,7 @@ namespace Roomie.Infrastructure.Messaging;
 /// </summary>
 public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFileTransferStore, IDisposable
 {
-    private const string TransferColumns = "transfer_id, peer_id, direction, filename, file_size, sha256, content_type, state, created_ms, local_path, failure, received_bytes, source_write_ticks";
+    private const string TransferColumns = "transfer_id, peer_id, direction, filename, file_size, sha256, content_type, state, created_ms, local_path, failure, received_bytes, source_write_ticks, partial_path";
 
     private const int Outgoing = 0;
     private const int Incoming = 1;
@@ -128,6 +128,13 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
         ALTER TABLE file_transfers ADD COLUMN source_write_ticks INTEGER NOT NULL DEFAULT 0;
 
         PRAGMA user_version = 4;
+        """,
+
+        // Received files can go to a folder of the user's choice, so an unfinished one has to say where it is.
+        """
+        ALTER TABLE file_transfers ADD COLUMN partial_path TEXT;
+
+        PRAGMA user_version = 5;
         """,
     ];
 
@@ -308,7 +315,7 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
     {
         ArgumentNullException.ThrowIfNull(transfer);
         Run(() => Execute(
-            $"INSERT INTO file_transfers ({TransferColumns}) VALUES ($id, $peer, $direction, $name, $size, $hash, $type, $state, $created, $path, $failure, $received, $ticks)",
+            $"INSERT INTO file_transfers ({TransferColumns}) VALUES ($id, $peer, $direction, $name, $size, $hash, $type, $state, $created, $path, $failure, $received, $ticks, $partial)",
             ("$id", Text(transfer.TransferId)),
             ("$peer", Text(transfer.PeerId)),
             ("$direction", transfer.Direction == MessageDirection.Incoming ? Incoming : Outgoing),
@@ -321,7 +328,8 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
             ("$path", transfer.LocalPath),
             ("$failure", transfer.Failure),
             ("$received", transfer.ReceivedBytes),
-            ("$ticks", transfer.SourceWriteTicks)));
+            ("$ticks", transfer.SourceWriteTicks),
+            ("$partial", transfer.PartialPath)));
     }
 
     public void SaveReceivedBytes(Guid peerId, Guid transferId, long receivedBytes) => Run(() => Execute(
@@ -342,6 +350,18 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
         $"SELECT {TransferColumns} FROM file_transfers WHERE peer_id = $peer ORDER BY created_ms DESC, rowid DESC LIMIT $limit",
         ReadTransfer,
         ("$peer", Text(peerId)),
+        ("$limit", maxTransfers)));
+
+    public void SavePartialPath(Guid peerId, Guid transferId, string partialPath) => Run(() => Execute(
+        "UPDATE file_transfers SET partial_path = $partial WHERE peer_id = $peer AND direction = $direction AND transfer_id = $id",
+        ("$partial", partialPath),
+        ("$peer", Text(peerId)),
+        ("$direction", Incoming),
+        ("$id", Text(transferId))));
+
+    public IReadOnlyList<StoredTransfer> GetRecentTransfers(int maxTransfers) => Run(() => Query(
+        $"SELECT {TransferColumns} FROM file_transfers ORDER BY created_ms DESC, rowid DESC LIMIT $limit",
+        ReadTransfer,
         ("$limit", maxTransfers)));
 
     public IReadOnlyList<StoredTransfer> GetOpenTransfers() => Run(() => Query(
@@ -642,7 +662,8 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
         reader.IsDBNull(9) ? null : reader.GetString(9),
         reader.IsDBNull(10) ? null : reader.GetString(10),
         reader.GetInt64(11),
-        reader.GetInt64(12));
+        reader.GetInt64(12),
+        reader.IsDBNull(13) ? null : reader.GetString(13));
 
     private static StoredGroup ReadGroup(SqliteDataReader reader)
     {

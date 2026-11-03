@@ -960,9 +960,10 @@ Payloads, in addition to `FILE_OFFER` above:
 
 Rules:
 
-- **Nothing is written without acceptance.** An offer only creates a record. The temporary file is created when the user accepts, after checking that the disk would keep 50 MB free.
+- **Nothing is written without acceptance.** An offer only creates a record. The temporary file is created when the user accepts, after checking that the chosen folder's disk would keep 50 MB free.
 - **Chunks.** Frames with no valid format, and any on a session that isn't paired or didn't agree the `file-transfer-2` capability, close the session, because the sender can't have meant them. A well-formed chunk for an unknown or unaccepted transfer, or from another device, gets `TRANSFER_REJECTED`, which counts towards the limit on refusals (§5.4). Chunks for a transfer that has ended are dropped silently, since some are always on their way. An out-of-order chunk, one past the offered size, or a third simultaneous file fails that transfer.
-- **Where files go.** Files stay in `files\incoming` until verified, then move to `files\downloads`. When it starts, Roomie removes anything in `files\incoming` that no open transfer needs. Verifying hashes the bytes read back from disk.
+- **Where files go.** The user chooses a folder, by default the Windows Downloads folder. A file stays in a hidden `.roomie-partial` folder inside it until verified, then is renamed into place. Keeping it on the same drive means a large file needs room only there, and finishing it is a single rename: a move across drives is a copy, and a crash part-way would leave a damaged file under its final name. The path is recorded with the transfer (`partial_path`), so a transfer accepted before the folder changed finishes where it started. Transfers accepted before version 0.10.0 have no such record, and finish in `files\downloads` from `files\incoming`. When it starts, Roomie removes anything in those two places that no open transfer needs. Verifying hashes the bytes read back from disk.
+- **A folder that's unavailable.** If the folder can't be used when the user accepts, for example because its USB drive was unplugged, Roomie says so and the offer stays open. If it disappears part-way, the transfer fails when it next tries to continue.
 - **Names (§10, rule 5).** An offered name is never a path. Separators and characters Windows forbids become `_`. Invisible formatting characters are removed, including the right-to-left override that can disguise `gpj.exe` as `exe.jpg`. Trailing dots and spaces are removed, because Windows would drop them and change the extension. Names Windows reserves, such as `CON`, get a `_` prefix. A name already taken gets a number, and nothing is ever overwritten.
 - **After arrival.** Roomie never opens a received file, and only offers to show it in its folder. The file gets the same `Zone.Identifier` mark a browser's download gets, so Windows warns before running it. Offers of files that can run programs carry a warning.
 - **Stopping.** A write in progress is never interrupted, because half a frame would end the session and everything on it. Canceling takes effect between chunks.
@@ -1242,3 +1243,18 @@ I suggest following this exact implementation sequence:
 I have intentionally placed identity and pairing before messaging. We should establish trust before allowing computers to exchange application data.
 
 My engineering rule for this project: Build one functional layer, test it on two real Windows computers, verify the result, and only then move to the next phase. No premature microservices, no unnecessary abstractions, and no skipping security fundamentals.
+
+## 15. The Windows interface as implemented
+
+Rules that aren't obvious from the screens:
+
+- **One copy per data folder.** A named mutex, derived from the data folder's path, keeps a second copy from sharing the database and ports. A second launch signals the first to show its window, then exits.
+- **Closing isn't exiting.** With the default setting, closing the window hides it, and Roomie keeps running for messages and files. **Exit Roomie** in the notification-area menu, signing out and shutting down all stop it properly, so the TLS key is removed from the key store (§10). A window that isn't active never counts messages as read.
+- **Notifications are balloon tips,** which Windows 10 and 11 show as ordinary notifications. Toast APIs need an installed app identity, which the portable build doesn't have. Windows reports only that the latest one was clicked, so clicking an older one in Action Center can open the wrong place or do nothing. Phase 11's MSIX package may allow real toasts.
+- **Text from other devices is untrusted in notifications too.** It appears outside Roomie, so names and message text lose control characters and direction marks, go on one line, and are cut to Windows' limits. A pairing request says what the device *calls itself*, because that name isn't verified. Message text can be turned off in Settings.
+- **Nothing steals focus from the background.** A request for attention brings up a window that is open. A minimized or hidden one stays put, with a notification and a flashing taskbar button, because anyone on the network can ask to pair.
+- **What counts as news.** A burst of messages from one conversation gives one notification every 5 seconds, and none while that conversation is open and in front. Transfer news comes from comparing the open transfers before and after each change, so no way of ending can be missed. What was already open at startup isn't announced.
+- **Settings** are in `config\settings.json`, written atomically. Unlike the trust list (§11), a file that can't be read is no reason to refuse to start: Roomie uses the defaults, says so, and replaces the file on the next change.
+- **Starting with Windows** uses the per-user `Run` registry value, which needs no administrator. It holds the exe's path, so it is rewritten at each start in case a portable copy moved, and the MSIX package will need its own mechanism.
+
+**Not in V1.** No high-contrast theme yet: the custom colours ignore the Windows high-contrast setting, which Phase 11 should fix. Pasting copies files only, not images from the clipboard. A folder can't be sent without zipping it first.

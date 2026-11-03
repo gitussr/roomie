@@ -777,6 +777,188 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         Assert.Equal(content, File.ReadAllBytes(bob.Incoming(alice, id)!.LocalPath!));
     }
 
+    // ---- The folder the user chose ----
+
+    [Fact]
+    public async Task ChosenFolder_GetsTheFile_AndNoUnfinishedFilesAreLeftThere()
+    {
+        var (alice, bob) = await PairedAsync();
+        var chosen = Path.Combine(_root, "chosen");
+        Assert.Null(bob.Files.TrySetReceiveFolder(chosen));
+        var (path, content) = CreateFile("video.mp4", 200_000);
+
+        var id = (await alice.Files.SendFileAsync(bob.Id, path)).TransferId!.Value;
+        await WaitUntil(() => bob.Incoming(alice, id)?.State == FileTransferState.Offered);
+        Assert.Null((await bob.Files.AcceptAsync(alice.Id, id)).Error);
+        await WaitUntil(() => bob.Incoming(alice, id)?.State == FileTransferState.Completed);
+
+        Assert.Equal(Path.Combine(chosen, "video.mp4"), bob.Incoming(alice, id)!.LocalPath);
+        Assert.Equal(content, File.ReadAllBytes(Path.Combine(chosen, "video.mp4")));
+        Assert.Equal(["video.mp4"], new DirectoryInfo(chosen).GetFileSystemInfos().Select(f => f.Name));
+        Assert.Empty(Directory.GetFiles(bob.Downloads));
+    }
+
+    [Fact]
+    public async Task ChangingTheFolder_LeavesATransferAlreadyAcceptedWhereItStarted()
+    {
+        var (alice, bob) = await PairedAsync();
+        var first = Path.Combine(_root, "first");
+        var second = Path.Combine(_root, "second");
+        Assert.Null(bob.Files.TrySetReceiveFolder(first));
+        var (path, content) = CreateFile("big.bin", 8 * 1024 * 1024);
+
+        var id = (await alice.Files.SendFileAsync(bob.Id, path)).TransferId!.Value;
+        await WaitUntil(() => bob.Incoming(alice, id)?.State == FileTransferState.Offered);
+        await bob.Files.AcceptAsync(alice.Id, id);
+        Assert.Null(bob.Files.TrySetReceiveFolder(second));
+        await WaitUntil(() => bob.Incoming(alice, id)?.State == FileTransferState.Completed);
+
+        Assert.Equal(content, File.ReadAllBytes(Path.Combine(first, "big.bin")));
+        Assert.Empty(Directory.GetFileSystemEntries(second));
+    }
+
+    [Fact]
+    public async Task ChosenFolder_ContinuesAfterARestart_FromTheSamePlace()
+    {
+        var (alice, bob) = await PairedAsync();
+        var chosen = Path.Combine(_root, "chosen");
+        Assert.Null(bob.Files.TrySetReceiveFolder(chosen));
+        var (path, content) = CreateFile("big.bin", 60 * 1024 * 1024);
+        var id = await StartMovingAsync(alice, bob, path);
+
+        bob = await RestartAsync(bob);
+
+        // Nothing here tells the restarted node about the folder: the transfer's own record has to.
+        var partial = bob.Incoming(alice, id)!.PartialPath;
+        Assert.NotNull(partial);
+        Assert.StartsWith(chosen, partial, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(partial));
+
+        await ConnectAsync(alice, bob);
+        await WaitUntil(() => alice.Outgoing(bob, id)!.State == FileTransferState.Completed);
+        Assert.Equal(content, File.ReadAllBytes(Path.Combine(chosen, "big.bin")));
+        Assert.False(File.Exists(partial));
+    }
+
+    [Fact]
+    public async Task CancelingInAChosenFolder_RemovesTheUnfinishedFile()
+    {
+        var (alice, bob) = await PairedAsync();
+        var chosen = Path.Combine(_root, "chosen");
+        Assert.Null(bob.Files.TrySetReceiveFolder(chosen));
+        var (path, _) = CreateFile("big.bin", 60 * 1024 * 1024);
+        var id = await StartMovingAsync(alice, bob, path);
+
+        Assert.Null((await bob.Files.CancelAsync(alice.Id, MessageDirection.Incoming, id)).Error);
+
+        Assert.Empty(Directory.GetFileSystemEntries(chosen));
+    }
+
+    [Fact]
+    public async Task AFolderThatCantBeUsed_IsRefused_AndTheOldOneStays()
+    {
+        var bob = await StartAsync("Bob");
+        var before = bob.Files.ReceiveFolder;
+        var notAFolder = Path.Combine(_root, "file.txt");
+        File.WriteAllText(notAFolder, "x");
+
+        Assert.NotNull(bob.Files.TrySetReceiveFolder(notAFolder));
+
+        Assert.Equal(before, bob.Files.ReceiveFolder);
+        Assert.Equal("x", File.ReadAllText(notAFolder));
+    }
+
+    [Fact]
+    public async Task AtStartup_LeftoversAreRemoved_ButNothingElseInTheChosenFolder()
+    {
+        var chosen = Path.Combine(_root, "chosen");
+        var partials = Path.Combine(chosen, ".roomie-partial");
+        Directory.CreateDirectory(partials);
+        var leftover = Path.Combine(partials, $"{Guid.NewGuid():N}.part");
+        var theirs = Path.Combine(chosen, "their-backup.part");
+        File.WriteAllText(leftover, "x");
+        File.WriteAllText(theirs, "keep me");
+
+        await StartAsync("Bob", new FileOptionsOverride(ReceiveFolder: chosen));
+
+        Assert.False(File.Exists(leftover));
+        Assert.Equal("keep me", File.ReadAllText(theirs));
+    }
+
+    [Fact]
+    public async Task AFileTooBigForTheChosenDrive_IsRefusedBeforeAnythingIsWritten()
+    {
+        var chosen = Path.Combine(_root, "chosen");
+        Directory.CreateDirectory(chosen);
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob", new FileOptionsOverride(MinFree: long.MaxValue / 2, ReceiveFolder: chosen));
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
+        var (path, _) = CreateFile("a.bin", 100);
+
+        var id = (await alice.Files.SendFileAsync(bob.Id, path)).TransferId!.Value;
+        await WaitUntil(() => bob.Incoming(alice, id)?.State == FileTransferState.Offered);
+
+        Assert.Contains("disk space", (await bob.Files.AcceptAsync(alice.Id, id)).Error, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFileSystemEntries(chosen));
+    }
+
+    [Fact]
+    public async Task AFolderThatHasGoneAway_RefusesTheAnswer_AndTheOfferStaysOpen()
+    {
+        var blocker = Path.Combine(_root, "not-a-folder");
+        File.WriteAllText(blocker, "x");
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob", new FileOptionsOverride(ReceiveFolder: Path.Combine(blocker, "gone")));
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
+        var (path, _) = CreateFile("a.bin", 100);
+
+        var id = (await alice.Files.SendFileAsync(bob.Id, path)).TransferId!.Value;
+        await WaitUntil(() => bob.Incoming(alice, id)?.State == FileTransferState.Offered);
+
+        Assert.Contains("isn't available", (await bob.Files.AcceptAsync(alice.Id, id)).Error, StringComparison.Ordinal);
+        Assert.Equal(FileTransferState.Offered, bob.Incoming(alice, id)!.State);
+    }
+
+    [Fact]
+    public async Task GetRecentTransfers_ListsEveryDevice_NewestFirst()
+    {
+        var (alice, bob) = await PairedAsync();
+        var (first, _) = CreateFile("first.txt", 10);
+        var (second, _) = CreateFile("second.txt", 10);
+
+        var one = (await alice.Files.SendFileAsync(bob.Id, first)).TransferId!.Value;
+        await Task.Delay(5);
+        var two = (await alice.Files.SendFileAsync(bob.Id, second)).TransferId!.Value;
+
+        Assert.Equal([two, one], alice.Files.GetRecentTransfers(10).Select(t => t.TransferId));
+        Assert.Equal([two], alice.Files.GetRecentTransfers(1).Select(t => t.TransferId));
+    }
+
+    [Fact]
+    public async Task IncomingMessage_IsRaisedOnce_WithTheMessage()
+    {
+        var (alice, bob) = await PairedAsync();
+        var heard = new List<StoredMessage>();
+        bob.Messaging.IncomingMessage += (_, message) =>
+        {
+            lock (heard)
+            {
+                heard.Add(message);
+            }
+        };
+
+        var sent = alice.Messaging.SendText(bob.Id, "Hello").Message!;
+        await WaitUntil(() => alice.Store.GetConversation(bob.Id).Single().State == DeliveryState.Delivered);
+
+        lock (heard)
+        {
+            Assert.Equal(sent.MessageId, Assert.Single(heard).MessageId);
+            Assert.Equal("Hello", heard[0].Content);
+        }
+    }
+
     [Fact]
     public async Task Sender_ContinuesFromTheByteTheReceiverAsksFor()
     {
@@ -1214,7 +1396,7 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         return peer;
     }
 
-    private sealed record FileOptionsOverride(int? MaxOpenOffers = null, long? MinFree = null, long? MaxFile = null);
+    private sealed record FileOptionsOverride(int? MaxOpenOffers = null, long? MinFree = null, long? MaxFile = null, string? ReceiveFolder = null);
 
     private Task<Node> StartAsync(string username, FileOptionsOverride? overrides = null)
     {
@@ -1252,6 +1434,7 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         {
             DownloadsDirectory = defaults.DownloadsDirectory,
             IncomingDirectory = defaults.IncomingDirectory,
+            ReceiveFolder = overrides?.ReceiveFolder,
             MaxOpenOffersPerDevice = overrides?.MaxOpenOffers ?? defaults.MaxOpenOffersPerDevice,
             MinFreeBytesAfterAccept = overrides?.MinFree ?? 0,
             MaxFileSizeBytes = overrides?.MaxFile ?? defaults.MaxFileSizeBytes,

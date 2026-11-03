@@ -81,6 +81,9 @@ public sealed partial class MessagingService : BackgroundService
     /// <summary>Raised on a background thread when a conversation changes. The argument is the device.</summary>
     public event EventHandler<Guid>? Changed;
 
+    /// <summary>Raised once for each new message from another device, after it is saved. A repeat doesn't raise it.</summary>
+    public event EventHandler<StoredMessage>? IncomingMessage;
+
     /// <summary>
     /// Saves a message and queues it for delivery. A device that is offline gets it when it reconnects.
     /// </summary>
@@ -447,6 +450,7 @@ public sealed partial class MessagingService : BackgroundService
         if (_store.TryAddIncoming(stored))
         {
             RaiseChanged(peerId);
+            IncomingMessage?.Invoke(this, stored);
         }
 
         // Also for a duplicate: its sender is retrying because the first acknowledgement never arrived.

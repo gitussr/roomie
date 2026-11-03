@@ -1,0 +1,22 @@
+<UserControl x:Class="Roomie.App.Views.TransfersView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Margin="24,20,24,8">
+            <TextBlock Text="Transfers" Style="{StaticResource HeadingText}" />
+            <TextBlock Margin="0,4,0,0" Style="{StaticResource MutedText}"
+                       Text="Files sent and received, newest first. An interrupted transfer continues by itself when the device is back." />
+            <TextBlock Margin="0,8,0,0" Text="{Binding Chat.SendError}" Style="{StaticResource ProblemText}" />
+        </StackPanel>
+
+        <Grid>
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          Visibility="{Binding HasTransfers, Converter={StaticResource BoolToVisibility}}">
+                <ItemsControl Margin="24,0,24,16" ItemsSource="{Binding AllTransfers}" Focusable="False" AutomationProperties.Name="Transfers" />
+            </ScrollViewer>
+            <TextBlock Margin="24,8" Style="{StaticResource MutedText}"
+                       Text="Nothing yet. Open a chat with a paired device, then drag a file onto it or choose Send file."
+                       Visibility="{Binding HasNoTransfers, Converter={StaticResource BoolToVisibility}}" />
+        </Grid>
+    </DockPanel>
+</UserControl>

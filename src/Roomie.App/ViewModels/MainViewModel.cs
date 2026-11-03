@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Roomie.App.Services;
 using Roomie.Core.Configuration;
 using Roomie.Core.Connections;
 using Roomie.Core.Discovery;
@@ -9,9 +11,9 @@ using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
+using Roomie.Core.Notifications;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
-using Roomie.Infrastructure.Storage;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
 using Roomie.Network.Files;
@@ -20,6 +22,15 @@ using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
 
 namespace Roomie.App.ViewModels;
+
+/// <summary>The screens on the navigation rail.</summary>
+public enum AppSection
+{
+    Chats,
+    Devices,
+    Transfers,
+    Settings,
+}
 
 /// <summary>A device as shown in the list. Discovery, connection and trust are shown separately.</summary>
 public sealed record NearbyDevice(
@@ -35,17 +46,43 @@ public sealed record NearbyDevice(
     bool CanPair,
     bool CanForget,
     bool CanUnblock,
-    bool CanChat = false,
-    string ChatLabel = "Chat");
+    bool CanChat = false);
 
-/// <summary>A group in the list.</summary>
-public sealed record GroupItem(string GroupId, string Name, string Details, string ChatLabel);
+/// <summary>A row in the list of conversations: a paired device or a group.</summary>
+public sealed record ConversationItem(
+    Guid? PeerId,
+    string? GroupId,
+    string Name,
+    string Preview,
+    string Time,
+    int Unread,
+    bool IsOnline,
+    bool IsOpen,
+    DateTimeOffset LastActivity)
+{
+    public bool IsGroup => GroupId is not null;
+
+    public bool IsDevice => GroupId is null;
+
+    public bool HasUnread => Unread > 0;
+
+    /// <summary>Spelled out because a coloured dot alone tells a screen reader, or someone who can't see the colour, nothing.</summary>
+    public string Description =>
+        $"{Name}, {(IsGroup ? "group" : IsOnline ? "online" : "offline")}{(HasUnread ? $", {Unread} unread" : string.Empty)}";
+
+    public string Initial => new StringInfo(Name).LengthInTextElements > 0
+        ? new StringInfo(Name).SubstringByTextElements(0, 1).ToUpper(CultureInfo.CurrentCulture)
+        : "?";
+}
 
 /// <summary>An invitation waiting for this user's answer.</summary>
 public sealed record GroupInviteItem(string GroupId, Guid OwnerId, string GroupName, string Details);
 
 public sealed partial class MainViewModel : ObservableObject
 {
+    private const int MaxShownTransfers = 200;
+    private const int PreviewLength = 70;
+
     private readonly DeviceIdentityStore _identityStore;
     private readonly PeerRegistry _registry;
     private readonly DiscoveryService _discovery;
@@ -59,7 +96,6 @@ public sealed partial class MainViewModel : ObservableObject
     private int _refreshQueued;
 
     public MainViewModel(
-        AppPaths paths,
         DeviceIdentityStore identityStore,
         PeerRegistry registry,
         DiscoveryService discovery,
@@ -69,13 +105,16 @@ public sealed partial class MainViewModel : ObservableObject
         GroupService groups,
         FileTransferService files,
         IMessageStore messages,
-        ITrustStore trust)
+        ITrustStore trust,
+        SettingsViewModel settings)
     {
         ArgumentNullException.ThrowIfNull(messaging);
         _messages = messages;
         _groups = groups;
         _files = files;
+        Settings = settings;
         Chat = new ChatViewModel(messaging, groups, files, messages, trust, identityStore);
+        Chat.FilesChanged += (_, _) => RefreshTransfers();
 
         _identityStore = identityStore;
         _registry = registry;
@@ -88,7 +127,6 @@ public sealed partial class MainViewModel : ObservableObject
         // Created on the UI thread; every service event arrives on a background thread.
         _ui = SynchronizationContext.Current ?? new SynchronizationContext();
 
-        DataDirectory = paths.Root;
         AppVersion = App.AppVersion;
 
         var identity = identityStore.Identity;
@@ -109,23 +147,32 @@ public sealed partial class MainViewModel : ObservableObject
         files.Changed += (_, _) => QueueRefresh();
         files.IncomingOffer += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
 
-        // Only the file list: rebuilding the device list this often would make its buttons hard to click.
-        files.ProgressChanged += (_, _) => _ui.Post(_ => Chat.RefreshFiles(), null);
+        // Only the file lists: rebuilding the device list this often would make its buttons hard to click.
+        files.ProgressChanged += (_, _) => _ui.Post(_ =>
+        {
+            Chat.RefreshFiles();
+            RefreshTransfers();
+        }, null);
         Refresh();
     }
 
-    /// <summary>Another device asked to pair: the window should get the user's attention.</summary>
+    /// <summary>Another device asked for something that needs an answer: the window should get the user's attention.</summary>
     public event EventHandler? AttentionRequested;
 
     public PairingViewModel Pairing { get; }
 
     public ChatViewModel Chat { get; }
 
+    public SettingsViewModel Settings { get; }
+
     public string Title { get; } = "Roomie";
 
     /// <summary>Includes the unread count, so new messages show on the taskbar.</summary>
     [ObservableProperty]
     private string _windowTitle = "Roomie";
+
+    [ObservableProperty]
+    private AppSection _section = AppSection.Chats;
 
     [ObservableProperty]
     private bool _isChatVisible;
@@ -135,20 +182,41 @@ public sealed partial class MainViewModel : ObservableObject
 
     public string AppVersion { get; }
 
-    public string DataDirectory { get; }
-
     public string DisplayId { get; }
 
     public string Fingerprint { get; }
 
     public string NetworkSummary { get; } =
-        $"Discovery UDP {NetworkDefaults.DiscoveryUdpPort} · Messaging TCP {NetworkDefaults.MessagingTcpPort}";
+        $"Discovery: UDP {NetworkDefaults.DiscoveryUdpPort}. Messaging and files: TCP {NetworkDefaults.MessagingTcpPort}.";
 
     public ObservableCollection<NearbyDevice> NearbyDevices { get; } = [];
 
-    public ObservableCollection<GroupItem> Groups { get; } = [];
+    public ObservableCollection<ConversationItem> Conversations { get; } = [];
 
     public ObservableCollection<GroupInviteItem> GroupInvites { get; } = [];
+
+    /// <summary>Every recent transfer, with any device, newest first.</summary>
+    public ObservableCollection<FileTransferItem> AllTransfers { get; } = [];
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasNoTransfers))]
+    private bool _hasTransfers;
+
+    public bool HasNoTransfers => !HasTransfers;
+
+    [ObservableProperty]
+    private bool _hasNoConversations;
+
+    [ObservableProperty]
+    private int _totalUnread;
+
+    /// <summary>Transfers moving or waiting for this user's answer, for the rail.</summary>
+    [ObservableProperty]
+    private int _transfersNeedingAttention;
+
+    /// <summary>How far the files now moving have got, from 0 to 1, or null if none are moving.</summary>
+    [ObservableProperty]
+    private double? _taskbarProgress;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(CreateGroupCommand))]
@@ -159,6 +227,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private string _status = "Starting discovery…";
+
+    [ObservableProperty]
+    private string _onlineSummary = string.Empty;
 
     [ObservableProperty]
     private string? _discoveryProblem;
@@ -175,6 +246,9 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private string? _usernameError;
+
+    /// <summary>The window has focus, so what it shows is really being seen.</summary>
+    public bool IsWindowActive => Chat.IsWindowActive;
 
     private bool CanSaveUsername() => UsernameDraft.Trim() != Username;
 
@@ -234,8 +308,22 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void OpenChat(Guid deviceId)
     {
+        Section = AppSection.Chats;
         Chat.Open(deviceId);
         Refresh();
+    }
+
+    [RelayCommand]
+    private void OpenConversation(ConversationItem item)
+    {
+        if (item.PeerId is { } peerId)
+        {
+            OpenChat(peerId);
+        }
+        else if (item.GroupId is { } groupId)
+        {
+            OpenGroup(groupId);
+        }
     }
 
     private bool CanCreateGroup() => !string.IsNullOrWhiteSpace(NewGroupName);
@@ -255,6 +343,7 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void OpenGroup(string groupId)
     {
+        Section = AppSection.Chats;
         Chat.OpenGroup(groupId);
         Refresh();
     }
@@ -279,6 +368,40 @@ public sealed partial class MainViewModel : ObservableObject
         QueueRefresh();
     }
 
+    /// <summary>Whether the user can already see what a notification would announce.</summary>
+    public bool IsLookingAt(NotificationTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return IsWindowActive && Section == AppSection.Chats && !Pairing.IsVisible
+            && (target.PeerId is { } peerId ? Chat.PeerId == peerId : target.GroupId is { } groupId && Chat.GroupId == groupId);
+    }
+
+    /// <summary>Goes to what a notification was about.</summary>
+    public void Open(NotificationTarget? target)
+    {
+        if (target is null)
+        {
+            return;
+        }
+
+        if (target.ShowTransfers)
+        {
+            Section = AppSection.Transfers;
+        }
+        else if (target.PeerId is { } peerId)
+        {
+            OpenChat(peerId);
+        }
+        else if (target.GroupId is { } groupId)
+        {
+            OpenGroup(groupId);
+        }
+        else
+        {
+            Section = AppSection.Chats;
+        }
+    }
+
     // Coalesces bursts of background events into one UI update.
     private void QueueRefresh()
     {
@@ -297,7 +420,6 @@ public sealed partial class MainViewModel : ObservableObject
         Pairing.Update(_pairing.Current);
         var pairingBusy = _pairing.Current is { IsActive: true };
 
-        NearbyDevices.Clear();
         var connections = _connections.Snapshot().ToDictionary(c => c.DeviceId);
         var peers = _registry.Snapshot();
         var trusted = _trust.TrustedPeers.ToDictionary(p => p.DeviceId);
@@ -317,19 +439,35 @@ public sealed partial class MainViewModel : ObservableObject
             Chat.Update(string.Empty);
         }
 
-        IsChatVisible = Chat.IsOpen && !Pairing.IsVisible;
-        IsWelcomeVisible = !Chat.IsOpen && !Pairing.IsVisible;
+        IsChatVisible = Chat.IsOpen;
+        IsWelcomeVisible = !Chat.IsOpen;
 
         var unread = ReadUnreadCounts();
-        var totalUnread = unread.Values.Sum() + RefreshGroups();
-        WindowTitle = totalUnread > 0 ? $"({totalUnread}) {Title}" : Title;
+        var conversations = new List<ConversationItem>();
+        foreach (var peer in trusted.Values)
+        {
+            conversations.Add(ToConversation(peer, ConnectionOf(peer.DeviceId).IsConnected, unread.GetValueOrDefault(peer.DeviceId)));
+        }
 
+        var groupUnread = RefreshGroups(conversations);
+        conversations.Sort((a, b) =>
+        {
+            var byTime = b.LastActivity.CompareTo(a.LastActivity);
+            return byTime != 0 ? byTime : StringComparer.CurrentCultureIgnoreCase.Compare(a.Name, b.Name);
+        });
+        SyncInPlace(Conversations, conversations);
+        HasNoConversations = conversations.Count == 0;
+
+        TotalUnread = unread.Values.Sum() + groupUnread;
+        WindowTitle = TotalUnread > 0 ? $"({TotalUnread}) {Title}" : Title;
+
+        var devices = new List<NearbyDevice>();
         foreach (var peer in peers)
         {
             var address = peer.Addresses.Count > 1
                 ? $"{peer.Addresses[0]} (+{peer.Addresses.Count - 1})"
                 : peer.Addresses.Count == 1 ? peer.Addresses[0].ToString() : string.Empty;
-            NearbyDevices.Add(ToItem(peer.Username, peer.DisplayId, address, $"Roomie {peer.AppVersion}",
+            devices.Add(ToItem(peer.Username, peer.DisplayId, address, $"Roomie {peer.AppVersion}",
                 ConnectionOf(peer.DeviceId), trusted.ContainsKey(peer.DeviceId), blocked.Contains(peer.DeviceId), pairingBusy));
         }
 
@@ -339,26 +477,18 @@ public sealed partial class MainViewModel : ObservableObject
         {
             listed.Add(connection.DeviceId);
             var name = trusted.TryGetValue(connection.DeviceId, out var known) ? known.Username : "(not announcing)";
-            NearbyDevices.Add(ToItem(name, DeviceIdFormat.ToDisplayId(connection.DeviceId),
+            devices.Add(ToItem(name, DeviceIdFormat.ToDisplayId(connection.DeviceId),
                 connection.RemoteEndPoint?.Address.ToString() ?? string.Empty, string.Empty, connection,
                 trusted.ContainsKey(connection.DeviceId), isBlocked: false, pairingBusy));
         }
 
         foreach (var peer in trusted.Values.Where(p => !listed.Contains(p.DeviceId)))
         {
-            NearbyDevices.Add(ToItem(peer.Username, DeviceIdFormat.ToDisplayId(peer.DeviceId), "offline", string.Empty,
+            devices.Add(ToItem(peer.Username, DeviceIdFormat.ToDisplayId(peer.DeviceId), "offline", string.Empty,
                 ConnectionOf(peer.DeviceId), isTrusted: true, isBlocked: false, pairingBusy));
         }
 
-        for (var i = 0; i < NearbyDevices.Count; i++)
-        {
-            var count = unread.GetValueOrDefault(NearbyDevices[i].DeviceId);
-            NearbyDevices[i] = NearbyDevices[i] with
-            {
-                CanChat = NearbyDevices[i].CanForget,
-                ChatLabel = count > 0 ? $"Chat ({count})" : "Chat",
-            };
-        }
+        SyncInPlace(NearbyDevices, devices.Select(d => d with { CanChat = d.CanForget }).ToList());
 
         var status = _discovery.Status;
         Status = status.State switch
@@ -370,6 +500,15 @@ public sealed partial class MainViewModel : ObservableObject
             DiscoveryState.Stopped => "Discovery stopped",
             _ => string.Empty,
         };
+
+        var online = connections.Values.Count(c => c.IsConnected);
+        OnlineSummary = online switch
+        {
+            0 => "No devices connected",
+            1 => "1 device connected",
+            _ => $"{online} devices connected",
+        };
+
         var problems = status.Problems.Concat(_connections.Problems).ToList();
         DiscoveryProblem = problems.Count == 0 ? null : string.Join("\n", problems);
 
@@ -379,10 +518,49 @@ public sealed partial class MainViewModel : ObservableObject
                   + "If it is, check that Windows Firewall allows Roomie on private networks and that both "
                   + "networks are set to Private."
                 : "No devices found.";
+
+        RefreshTransfers();
+    }
+
+    /// <summary>Called a few times a second while data moves, so it reads only what it shows.</summary>
+    private void RefreshTransfers()
+    {
+        IReadOnlyList<StoredTransfer> transfers;
+        try
+        {
+            transfers = _files.GetRecentTransfers(MaxShownTransfers);
+        }
+        catch (MessageStoreException)
+        {
+            return;
+        }
+
+        FileTransferItem.Sync(AllTransfers, transfers, _files, peerId => _trust.FindTrusted(peerId)?.Username ?? DeviceIdFormat.ToDisplayId(peerId));
+        HasTransfers = AllTransfers.Count > 0;
+        TransfersNeedingAttention = AllTransfers.Count(t => t.CanAnswer || t.IsActive);
+
+        var moving = AllTransfers.Where(t => t.IsActive).ToList();
+        TaskbarProgress = moving.Count > 0 ? moving.Average(t => t.Percent) / 100 : null;
+    }
+
+    private ConversationItem ToConversation(TrustedPeer peer, bool isOnline, int unread)
+    {
+        StoredMessage? last = null;
+        try
+        {
+            last = LastOf(_messages.GetConversation(peer.DeviceId, 1));
+        }
+        catch (MessageStoreException)
+        {
+            // The list still works without a preview. The store logged the failure.
+        }
+
+        return new ConversationItem(peer.DeviceId, null, peer.Username, PreviewOf(last, null) ?? "No messages yet",
+            TimeOf(last), unread, isOnline, Chat.PeerId == peer.DeviceId, last?.Timestamp ?? DateTimeOffset.MinValue);
     }
 
     /// <returns>The unread messages across all groups.</returns>
-    private int RefreshGroups()
+    private int RefreshGroups(List<ConversationItem> conversations)
     {
         IReadOnlyList<StoredGroup> groups;
         IReadOnlyList<StoredInvite> invites;
@@ -399,24 +577,24 @@ public sealed partial class MainViewModel : ObservableObject
             return 0;
         }
 
-        var items = groups
-            .OrderBy(g => g.State.Name, StringComparer.CurrentCultureIgnoreCase)
-            .Select(g =>
-            {
-                var count = unread.GetValueOrDefault(g.State.GroupId);
-                var details = g.IsMember
-                    ? $"{g.State.Members.Count} {(g.State.Members.Count == 1 ? "member" : "members")}"
-                    : "You were removed";
-                return new GroupItem(g.State.GroupId, g.State.Name, details, count > 0 ? $"Open ({count})" : "Open");
-            })
-            .ToList();
-        if (!Groups.SequenceEqual(items))
+        foreach (var group in groups)
         {
-            Groups.Clear();
-            foreach (var item in items)
+            StoredMessage? last = null;
+            try
             {
-                Groups.Add(item);
+                last = LastOf(_messages.GetGroupConversation(group.State.GroupId, 1));
             }
+            catch (MessageStoreException)
+            {
+                // As above.
+            }
+
+            var details = group.IsMember
+                ? $"{group.State.Members.Count} {(group.State.Members.Count == 1 ? "member" : "members")}"
+                : "You were removed";
+            conversations.Add(new ConversationItem(null, group.State.GroupId, group.State.Name, PreviewOf(last, group.State) ?? details,
+                TimeOf(last), unread.GetValueOrDefault(group.State.GroupId), false, Chat.GroupId == group.State.GroupId,
+                last?.Timestamp ?? DateTimeOffset.MinValue));
         }
 
         var open = new List<GroupInviteItem>();
@@ -429,16 +607,40 @@ public sealed partial class MainViewModel : ObservableObject
             }
         }
 
-        if (!GroupInvites.SequenceEqual(open))
+        SyncInPlace(GroupInvites, open);
+        return unread.Values.Sum();
+    }
+
+    private static StoredMessage? LastOf(IReadOnlyList<StoredMessage> messages) => messages.Count > 0 ? messages[^1] : null;
+
+    private static string? PreviewOf(StoredMessage? message, GroupState? group)
+    {
+        if (message is null)
         {
-            GroupInvites.Clear();
-            foreach (var item in open)
-            {
-                GroupInvites.Add(item);
-            }
+            return null;
         }
 
-        return unread.Values.Sum();
+        var text = NotificationText.Clean(message.Content, PreviewLength);
+        if (message.Direction == MessageDirection.Outgoing)
+        {
+            return $"You: {text}";
+        }
+
+        var sender = group?.Members.FirstOrDefault(m => m.DeviceId == message.PeerId)?.Username;
+        return sender is null ? text : $"{sender}: {text}";
+    }
+
+    private static string TimeOf(StoredMessage? message)
+    {
+        if (message is null)
+        {
+            return string.Empty;
+        }
+
+        var local = message.Timestamp.ToLocalTime();
+        return local.Date == DateTimeOffset.Now.Date
+            ? local.ToString("t", CultureInfo.CurrentCulture)
+            : local.ToString("d", CultureInfo.CurrentCulture);
     }
 
     private Dictionary<Guid, int> ReadUnreadCounts()
@@ -459,6 +661,27 @@ public sealed partial class MainViewModel : ObservableObject
         {
             // The device list still works without the counts. The store logged the failure.
             return [];
+        }
+    }
+
+    // Changes only what differs, so buttons not affected stay under the mouse and the scroll position stays put.
+    private static void SyncInPlace<T>(ObservableCollection<T> items, List<T> wanted)
+    {
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            if (i >= items.Count)
+            {
+                items.Add(wanted[i]);
+            }
+            else if (!EqualityComparer<T>.Default.Equals(items[i], wanted[i]))
+            {
+                items[i] = wanted[i];
+            }
+        }
+
+        while (items.Count > wanted.Count)
+        {
+            items.RemoveAt(items.Count - 1);
         }
     }
 

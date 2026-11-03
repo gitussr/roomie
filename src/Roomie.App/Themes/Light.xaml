@@ -1,0 +1,26 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <SolidColorBrush x:Key="WindowBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="RailBrush" Color="#F4EFEE" />
+    <SolidColorBrush x:Key="PaneBrush" Color="#FAF8F7" />
+    <SolidColorBrush x:Key="RaisedBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="SubtleBrush" Color="#F2EDEC" />
+    <SolidColorBrush x:Key="HoverBrush" Color="#ECE4E3" />
+    <SolidColorBrush x:Key="SelectedBrush" Color="#F3DEDC" />
+    <SolidColorBrush x:Key="LineBrush" Color="#DDD4D3" />
+    <SolidColorBrush x:Key="ControlLineBrush" Color="#8E8381" />
+    <SolidColorBrush x:Key="TextBrush" Color="#201A1A" />
+    <SolidColorBrush x:Key="MutedTextBrush" Color="#615756" />
+    <SolidColorBrush x:Key="DisabledTextBrush" Color="#8E8381" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#A83A3A" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F2F2F" />
+    <SolidColorBrush x:Key="OnAccentBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="MineBubbleBrush" Color="#F3DEDC" />
+    <SolidColorBrush x:Key="TheirBubbleBrush" Color="#F2EDEC" />
+    <SolidColorBrush x:Key="ProblemBrush" Color="#B3261E" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#1B6E3C" />
+    <SolidColorBrush x:Key="NoticeBrush" Color="#FFF3D6" />
+    <SolidColorBrush x:Key="OnlineBrush" Color="#2E8B57" />
+    <SolidColorBrush x:Key="OfflineBrush" Color="#A69C9A" />
+    <SolidColorBrush x:Key="ScrimBrush" Color="#F2FFFFFF" />
+</ResourceDictionary>

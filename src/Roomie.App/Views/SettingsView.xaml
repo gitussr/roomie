@@ -1,0 +1,65 @@
+<UserControl x:Class="Roomie.App.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="24,20,24,24" MaxWidth="640" HorizontalAlignment="Left">
+            <TextBlock Text="Settings" Style="{StaticResource HeadingText}" />
+            <TextBlock Margin="0,8,0,0" Text="{Binding Settings.Problem}" Style="{StaticResource ProblemText}" />
+
+            <TextBlock Margin="0,20,0,6" Text="This computer" Style="{StaticResource SectionText}" />
+            <TextBlock Style="{StaticResource MutedText}" Text="The name other devices see." />
+            <DockPanel Margin="0,6,0,0">
+                <Button DockPanel.Dock="Right" Margin="6,0,0,0" Content="Rename" Command="{Binding SaveUsernameCommand}" />
+                <TextBox Text="{Binding UsernameDraft, UpdateSourceTrigger=PropertyChanged}" MaxLength="32" AutomationProperties.Name="Name of this computer">
+                    <TextBox.InputBindings>
+                        <KeyBinding Key="Enter" Command="{Binding SaveUsernameCommand}" />
+                    </TextBox.InputBindings>
+                </TextBox>
+            </DockPanel>
+            <TextBlock Margin="0,4,0,0" Text="{Binding UsernameError}" Style="{StaticResource ProblemText}" />
+
+            <TextBlock Margin="0,24,0,6" Text="Received files" Style="{StaticResource SectionText}" />
+            <TextBlock Style="{StaticResource MutedText}"
+                       Text="Files are saved here. A large file needs room on this drive, including while it arrives. A transfer already accepted finishes where it started." />
+            <TextBox Margin="0,6,0,0" Text="{Binding Settings.ReceiveFolder, Mode=OneWay}" IsReadOnly="True" AutomationProperties.Name="Folder for received files" />
+            <WrapPanel Margin="0,6,0,0">
+                <Button Content="Change folder…" Margin="0,0,6,0" Command="{Binding Settings.ChooseReceiveFolderCommand}" />
+                <Button Content="Open folder" Command="{Binding Settings.OpenReceiveFolderCommand}" />
+            </WrapPanel>
+
+            <TextBlock Margin="0,24,0,8" Text="Appearance" Style="{StaticResource SectionText}" />
+            <WrapPanel>
+                <RadioButton GroupName="Theme" Content="Same as Windows" IsChecked="{Binding Settings.IsSystemTheme}" />
+                <RadioButton GroupName="Theme" Content="Light" IsChecked="{Binding Settings.IsLightTheme}" />
+                <RadioButton GroupName="Theme" Content="Dark" IsChecked="{Binding Settings.IsDarkTheme}" />
+            </WrapPanel>
+
+            <TextBlock Margin="0,24,0,4" Text="Running in the background" Style="{StaticResource SectionText}" />
+            <CheckBox IsChecked="{Binding Settings.CloseToTray}">
+                <TextBlock TextWrapping="Wrap" Text="Keep running when the window is closed, so messages and files still arrive. Exit from the icon in the notification area." />
+            </CheckBox>
+            <CheckBox Content="Start Roomie when I sign in to Windows" IsChecked="{Binding Settings.StartWithWindows}" />
+
+            <TextBlock Margin="0,24,0,4" Text="Notifications" Style="{StaticResource SectionText}" />
+            <CheckBox Content="Show notifications for messages, files and pairing requests" IsChecked="{Binding Settings.Notifications}" />
+            <CheckBox IsChecked="{Binding Settings.ShowMessageText}" IsEnabled="{Binding Settings.Notifications}">
+                <TextBlock TextWrapping="Wrap" Text="Include the message text. Turn this off if others can see this screen." />
+            </CheckBox>
+
+            <TextBlock Margin="0,24,0,6" Text="About" Style="{StaticResource SectionText}" />
+            <TextBlock Style="{StaticResource MutedText}">
+                <Run Text="Roomie version" />
+                <Run Text="{Binding AppVersion, Mode=OneWay}" />
+            </TextBlock>
+            <TextBlock Margin="0,4,0,0" Style="{StaticResource MutedText}">
+                <Run Text="Device ID:" />
+                <Run Text="{Binding DisplayId, Mode=OneWay}" FontFamily="Consolas" />
+            </TextBlock>
+            <TextBlock Margin="0,4,0,0" Style="{StaticResource MutedText}" Text="{Binding NetworkSummary}" />
+            <TextBlock Margin="0,4,0,0" Style="{StaticResource MutedText}" Text="{Binding Settings.DataDirectory, StringFormat='Data: {0}'}" />
+            <TextBlock Margin="0,10,0,2" Text="Security fingerprint" FontWeight="SemiBold" />
+            <TextBox Style="{StaticResource SelectableText}" Text="{Binding Fingerprint, Mode=OneWay}" FontFamily="Consolas" AutomationProperties.Name="Security fingerprint" />
+            <Button Margin="0,10,0,0" HorizontalAlignment="Left" Content="Open log folder" Command="{Binding Settings.OpenLogsCommand}" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

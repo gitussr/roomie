@@ -69,6 +69,7 @@ public enum FileTransferState
 /// <param name="LocalPath">Sender: the source file. Receiver: where it was saved, once verified.</param>
 /// <param name="ReceivedBytes">Receiver: how much of the file is known to be safely on disk.</param>
 /// <param name="SourceWriteTicks">Sender: when the source file last changed, as it was when hashed. 0 if unknown.</param>
+/// <param name="PartialPath">Receiver: where the unfinished file is, if not in the default incoming folder.</param>
 public sealed record StoredTransfer(
     Guid TransferId,
     Guid PeerId,
@@ -82,7 +83,8 @@ public sealed record StoredTransfer(
     string? LocalPath = null,
     string? Failure = null,
     long ReceivedBytes = 0,
-    long SourceWriteTicks = 0);
+    long SourceWriteTicks = 0,
+    string? PartialPath = null);
 
 /// <summary>Transfer records. A transfer belongs to one device and direction, so no peer can touch another's. Methods throw <see cref="MessageStoreException"/> if the store fails.</summary>
 public interface IFileTransferStore
@@ -93,6 +95,9 @@ public interface IFileTransferStore
 
     /// <summary>The latest transfers with a device, newest first.</summary>
     IReadOnlyList<StoredTransfer> GetTransfers(Guid peerId, int maxTransfers);
+
+    /// <summary>The latest transfers with any device, newest first.</summary>
+    IReadOnlyList<StoredTransfer> GetRecentTransfers(int maxTransfers);
 
     /// <summary>Every transfer that hasn't ended, with any device.</summary>
     IReadOnlyList<StoredTransfer> GetOpenTransfers();
@@ -108,6 +113,9 @@ public interface IFileTransferStore
 
     /// <summary>Records how much of an incoming file is safely on disk, so a transfer can continue from there.</summary>
     void SaveReceivedBytes(Guid peerId, Guid transferId, long receivedBytes);
+
+    /// <summary>Records where an incoming file is being written, so it can be found again after a restart.</summary>
+    void SavePartialPath(Guid peerId, Guid transferId, string partialPath);
 }
 
 /// <summary>One binary chunk (architecture.md §8): transfer ID, sequence number, data length, data.</summary>

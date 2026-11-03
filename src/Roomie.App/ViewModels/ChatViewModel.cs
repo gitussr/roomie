@@ -33,6 +33,9 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
 
     private const int MaxShownFiles = 50;
 
+    /// <summary>A file action changed something, so other lists of files should look again.</summary>
+    public event EventHandler? FilesChanged;
+
     /// <summary>Files with this device, newest first.</summary>
     public ObservableCollection<FileTransferItem> Files { get; } = [];
 
@@ -60,7 +63,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     public string? GroupId { get; private set; }
 
     /// <summary>The window is in front, so an open conversation is really being read.</summary>
-    public bool IsWindowActive { get; set; } = true;
+    public bool IsWindowActive { get; set; }
 
     [ObservableProperty]
     private bool _isOpen;
@@ -173,27 +176,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
             return;
         }
 
-        for (var i = Files.Count - 1; i >= 0; i--)
-        {
-            if (transfers.All(t => t.TransferId != Files[i].TransferId))
-            {
-                Files.RemoveAt(i);
-            }
-        }
-
-        for (var i = 0; i < transfers.Count; i++)
-        {
-            var transfer = transfers[i];
-            var item = Files.FirstOrDefault(f => f.TransferId == transfer.TransferId && f.Direction == transfer.Direction);
-            if (item is null)
-            {
-                item = new FileTransferItem(transfer.TransferId, peerId, transfer.Direction, transfer.Filename);
-                Files.Insert(Math.Min(i, Files.Count), item);
-            }
-
-            item.Update(transfer, files.GetProgress(peerId, transfer.TransferId), files.IsPaused(transfer));
-        }
-
+        FileTransferItem.Sync(Files, transfers, files);
         HasFiles = Files.Count > 0;
         var waiting = Files.Count(f => f.CanAnswer);
         FilesTitle = waiting > 0 ? $"Files ({waiting} waiting for your answer)" : "Files";
@@ -209,10 +192,46 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
             return;
         }
 
-        var dialog = new OpenFileDialog { Title = "Choose a file to send", CheckFileExists = true };
+        var dialog = new OpenFileDialog { Title = "Choose files to send", CheckFileExists = true, Multiselect = true };
         if (dialog.ShowDialog() == true)
         {
-            await StartSendingAsync(peerId, dialog.FileName);
+            await SendPathsAsync(peerId, dialog.FileNames);
+        }
+    }
+
+    /// <summary>Sends files dropped on the conversation or pasted into it.</summary>
+    public async Task SendPathsAsync(IReadOnlyCollection<string> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (IsGroup)
+        {
+            SendError = "Files go to one device at a time, not to a group. Open a chat with the device instead.";
+        }
+        else if (PeerId is not { } peerId || !CanCompose)
+        {
+            SendError = "Pair with this device before sending it files.";
+        }
+        else
+        {
+            await SendPathsAsync(peerId, paths);
+        }
+    }
+
+    private async Task SendPathsAsync(Guid peerId, IReadOnlyCollection<string> paths)
+    {
+        var folders = paths.Where(Directory.Exists).ToList();
+        foreach (var path in paths.Except(folders))
+        {
+            await StartSendingAsync(peerId, path);
+            if (SendError is not null)
+            {
+                return;
+            }
+        }
+
+        if (folders.Count > 0)
+        {
+            SendError = $"Roomie sends files, not folders. Zip \"{Path.GetFileName(folders[0])}\" first, then send the zip.";
         }
     }
 
@@ -223,6 +242,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         {
             SendError = (await files.SendFileAsync(peerId, path)).Error;
             RefreshFiles();
+            FilesChanged?.Invoke(this, EventArgs.Empty);
         }
         finally
         {
@@ -235,6 +255,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     {
         SendError = (await files.AcceptAsync(item.PeerId, item.TransferId)).Error;
         RefreshFiles();
+        FilesChanged?.Invoke(this, EventArgs.Empty);
     }
 
     [RelayCommand]
@@ -242,6 +263,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     {
         SendError = (await files.DeclineAsync(item.PeerId, item.TransferId)).Error;
         RefreshFiles();
+        FilesChanged?.Invoke(this, EventArgs.Empty);
     }
 
     [RelayCommand]
@@ -249,6 +271,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     {
         SendError = (await files.CancelAsync(item.PeerId, item.Direction, item.TransferId)).Error;
         RefreshFiles();
+        FilesChanged?.Invoke(this, EventArgs.Empty);
     }
 
     [RelayCommand]

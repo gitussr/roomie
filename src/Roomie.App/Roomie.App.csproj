@@ -17,8 +17,18 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- Only for the notification-area icon, which WPF doesn't have. -->
+    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\roomie.ico</ApplicationIcon>
+    <!-- Required by the generated code behind LibraryImport. Roomie's own code has no unsafe blocks. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Windows Forms names such as Button and Application would clash with WPF's in every file. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
   <ItemGroup>
     <Resource Include="Assets\roomie.ico" />

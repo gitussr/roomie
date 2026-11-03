@@ -12,8 +12,11 @@ namespace Roomie.Network.Files;
 
 public sealed class FileTransferOptions
 {
-    /// <summary>Where verified files end up.</summary>
+    /// <summary>Where verified files end up unless the user chose a folder, and always for a transfer accepted before they did.</summary>
     public required string DownloadsDirectory { get; init; }
+
+    /// <summary>The folder the user chose for received files. Null means <see cref="DownloadsDirectory"/>.</summary>
+    public string? ReceiveFolder { get; init; }
 
     /// <summary>Where files stay until they are verified. What a transfer still open needs survives a restart.</summary>
     public required string IncomingDirectory { get; init; }
@@ -60,6 +63,9 @@ public sealed partial class FileTransferService : BackgroundService
         FileTransferState.Waiting, FileTransferState.Offered, FileTransferState.Accepted, FileTransferState.Transferring, FileTransferState.Verifying,
     ];
 
+    /// <summary>Hidden folder for unfinished files, inside a folder the user chose.</summary>
+    private const string PartialFolderName = ".roomie-partial";
+
     private readonly ConnectionManager _connections;
     private readonly IFileTransferStore _store;
     private readonly ITrustStore _trust;
@@ -79,6 +85,7 @@ public sealed partial class FileTransferService : BackgroundService
     private readonly CancellationTokenSource _stopping = new();
     private readonly Dictionary<(Guid Peer, Guid Transfer), long> _progress = [];
     private long _lastProgressTicks;
+    private volatile string _receiveFolder;
 
     public FileTransferService(
         ConnectionManager connections,
@@ -94,6 +101,7 @@ public sealed partial class FileTransferService : BackgroundService
         _options = options;
         _time = time;
         _logger = logger;
+        _receiveFolder = Path.GetFullPath(options.ReceiveFolder ?? options.DownloadsDirectory);
 
         _registration = connections.Dispatcher.Register(
             [RmpMessageTypes.FileOffer, RmpMessageTypes.FileAccept, RmpMessageTypes.FileResume, RmpMessageTypes.FileReject, RmpMessageTypes.FileComplete, RmpMessageTypes.FileAck],
@@ -112,6 +120,36 @@ public sealed partial class FileTransferService : BackgroundService
 
     /// <summary>Raised when another device offers a file.</summary>
     public event EventHandler? IncomingOffer;
+
+    /// <summary>Where newly accepted files will be saved.</summary>
+    public string ReceiveFolder => _receiveFolder;
+
+    /// <summary>
+    /// Changes where newly accepted files are saved. A transfer already accepted finishes where it started,
+    /// because its unfinished file is on that drive.
+    /// </summary>
+    /// <returns>Why the folder can't be used, or null if it is now in use.</returns>
+    public string? TrySetReceiveFolder(string folder)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(folder);
+        try
+        {
+            var full = Path.GetFullPath(folder);
+            Directory.CreateDirectory(full);
+
+            // The only reliable way to know a folder can be written to is to write to it.
+            var probe = Path.Combine(full, $".roomie-{Guid.NewGuid():N}.tmp");
+            File.WriteAllBytes(probe, []);
+            File.Delete(probe);
+            _receiveFolder = full;
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            LogSaveFailed(_logger, Guid.Empty, ex.Message);
+            return "Roomie can't save files in that folder. Choose another one.";
+        }
+    }
 
     /// <summary>Hashes a file and offers it. A device that is offline gets the offer when it reconnects.</summary>
     public async Task<FileActionResult> SendFileAsync(Guid peerId, string path, CancellationToken cancellationToken = default)
@@ -186,12 +224,18 @@ public sealed partial class FileTransferService : BackgroundService
                 return new FileActionResult(transferId, "That device isn't connected right now. Try again when it's back.");
             }
 
+            // Checked before anything can change: a folder on a disk that was unplugged shouldn't lose the offer.
+            if (!CanUseReceiveFolder())
+            {
+                return new FileActionResult(transferId, "The folder for received files isn't available. Plug its drive back in, or choose another in Settings.");
+            }
+
             if (FreeSpace() is { } free && free < offer.FileSize + _options.MinFreeBytesAfterAccept)
             {
                 return new FileActionResult(transferId, "There isn't enough free disk space for this file.");
             }
 
-            var temporary = TemporaryPath(transferId);
+            var temporary = PathForNewFile(peerId, transferId);
             var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 81920, FileOptions.Asynchronous);
             lock (_gate)
             {
@@ -200,7 +244,7 @@ public sealed partial class FileTransferService : BackgroundService
 
             if (!_store.TryMoveTransfer(peerId, MessageDirection.Incoming, transferId, FileTransferState.Accepted, null, null, FileTransferState.Offered))
             {
-                await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+                await AbandonReceivingAsync(peerId, transferId).ConfigureAwait(false);
                 return new FileActionResult(transferId, "This offer is no longer open.");
             }
 
@@ -221,7 +265,7 @@ public sealed partial class FileTransferService : BackgroundService
         }
         catch (MessageStoreException)
         {
-            await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+            await AbandonReceivingAsync(peerId, transferId).ConfigureAwait(false);
             return new FileActionResult(transferId, "Roomie couldn't save this answer.");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
@@ -274,7 +318,7 @@ public sealed partial class FileTransferService : BackgroundService
             {
                 // Recorded first, so nothing can start the transfer up again while its file is being removed.
                 _store.TryMoveTransfer(peerId, direction, transferId, FileTransferState.Canceled, null, null, OpenStates);
-                await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+                await AbandonReceivingAsync(peerId, transferId).ConfigureAwait(false);
             }
 
             ForgetProgress(peerId, transferId);
@@ -291,6 +335,10 @@ public sealed partial class FileTransferService : BackgroundService
     }
 
     public IReadOnlyList<StoredTransfer> GetTransfers(Guid peerId, int maxTransfers) => _store.GetTransfers(peerId, maxTransfers);
+
+    public IReadOnlyList<StoredTransfer> GetRecentTransfers(int maxTransfers) => _store.GetRecentTransfers(maxTransfers);
+
+    public StoredTransfer? GetTransfer(Guid peerId, MessageDirection direction, Guid transferId) => _store.GetTransfer(peerId, direction, transferId);
 
     public IReadOnlyList<StoredTransfer> GetOpenTransfers() => _store.GetOpenTransfers();
 
@@ -356,13 +404,15 @@ public sealed partial class FileTransferService : BackgroundService
             var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var transfer in _store.GetOpenTransfers().Where(t => t is { Direction: MessageDirection.Incoming, State: FileTransferState.Accepted or FileTransferState.Transferring or FileTransferState.Verifying }))
             {
-                keep.Add($"{transfer.TransferId:N}.part");
+                keep.Add(Path.GetFullPath(PartialPathOf(transfer)));
                 _store.TryMoveTransfer(transfer.PeerId, MessageDirection.Incoming, transfer.TransferId, FileTransferState.Transferring, null, null, FileTransferState.Verifying);
                 _progress[(transfer.PeerId, transfer.TransferId)] = transfer.ReceivedBytes;
             }
 
             Directory.CreateDirectory(_options.IncomingDirectory);
-            foreach (var leftover in Directory.GetFiles(_options.IncomingDirectory, "*.part").Where(f => !keep.Contains(Path.GetFileName(f))))
+            var partials = Path.Combine(_receiveFolder, PartialFolderName);
+            var folders = Directory.Exists(partials) ? new[] { _options.IncomingDirectory, partials } : [_options.IncomingDirectory];
+            foreach (var leftover in folders.SelectMany(f => Directory.GetFiles(f, "*.part")).Where(f => !keep.Contains(Path.GetFullPath(f))))
             {
                 File.Delete(leftover);
             }
@@ -788,11 +838,13 @@ public sealed partial class FileTransferService : BackgroundService
             if (verified)
             {
                 var saved = MoveIntoDownloads(receiving);
+                RemovePartialFolderIfEmpty(receiving.TemporaryPath);
                 FinishIncoming(peerId, transferId, FileTransferState.Completed, null, saved);
             }
             else
             {
                 DeleteQuietly(receiving.TemporaryPath);
+                RemovePartialFolderIfEmpty(receiving.TemporaryPath);
                 FinishIncoming(peerId, transferId, FileTransferState.Failed, "The file arrived damaged: its contents don't match what was offered. It was removed.");
             }
         }
@@ -1018,7 +1070,7 @@ public sealed partial class FileTransferService : BackgroundService
 
         // Anything past the last recorded point may not have reached the disk, so it is cut off and sent again.
         var saved = _store.GetTransfer(transfer.PeerId, MessageDirection.Incoming, transferId)?.ReceivedBytes ?? 0;
-        var path = TemporaryPath(transferId);
+        var path = PartialPathOf(transfer);
         Receiving receiving;
         try
         {
@@ -1044,7 +1096,7 @@ public sealed partial class FileTransferService : BackgroundService
         // Checked after registering: whatever ends a transfer records that first and then removes what's registered.
         if (_store.GetTransfer(transfer.PeerId, MessageDirection.Incoming, transferId) is not { State: FileTransferState.Accepted or FileTransferState.Transferring })
         {
-            await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+            await AbandonReceivingAsync(transfer.PeerId, transferId).ConfigureAwait(false);
             return;
         }
 
@@ -1108,11 +1160,11 @@ public sealed partial class FileTransferService : BackgroundService
     private async Task FailReceivingAsync(Guid peerId, Guid transferId, FileTransferState state, string? failure)
     {
         FinishIncoming(peerId, transferId, state, failure);
-        await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+        await AbandonReceivingAsync(peerId, transferId).ConfigureAwait(false);
     }
 
     /// <summary>Removes the temporary file, including that of a paused transfer, which nothing has open.</summary>
-    private async Task AbandonReceivingAsync(Guid transferId)
+    private async Task AbandonReceivingAsync(Guid peerId, Guid transferId)
     {
         Receiving? receiving;
         lock (_gate)
@@ -1137,7 +1189,21 @@ public sealed partial class FileTransferService : BackgroundService
             }
         }
 
-        DeleteQuietly(TemporaryPath(transferId));
+        var path = receiving?.TemporaryPath;
+        if (path is null)
+        {
+            try
+            {
+                path = _store.GetTransfer(peerId, MessageDirection.Incoming, transferId) is { } transfer ? PartialPathOf(transfer) : DefaultPartialPath(transferId);
+            }
+            catch (MessageStoreException)
+            {
+                path = DefaultPartialPath(transferId);
+            }
+        }
+
+        DeleteQuietly(path);
+        RemovePartialFolderIfEmpty(path);
     }
 
     /// <summary>Everything open pauses, so it can continue after the next start.</summary>
@@ -1220,11 +1286,14 @@ public sealed partial class FileTransferService : BackgroundService
     /// <summary>Moves a verified file into place under a name nothing else has, and marks it as coming from outside this computer.</summary>
     private string MoveIntoDownloads(Receiving receiving)
     {
-        Directory.CreateDirectory(_options.DownloadsDirectory);
+        // The folder the unfinished file is in decides, so this stays one rename on one drive. A move across
+        // drives is a copy, and a crash part-way would leave a damaged file under its final name.
+        var folder = FinalFolderOf(receiving.TemporaryPath);
+        Directory.CreateDirectory(folder);
         var name = receiving.Offer.Filename;
         for (var counter = 0; ; counter++)
         {
-            var candidate = Path.Combine(_options.DownloadsDirectory, counter == 0 ? name : SafeFilename.WithCounter(name, counter));
+            var candidate = Path.Combine(folder, counter == 0 ? name : SafeFilename.WithCounter(name, counter));
             try
             {
                 File.Move(receiving.TemporaryPath, candidate, overwrite: false);
@@ -1251,11 +1320,25 @@ public sealed partial class FileTransferService : BackgroundService
         }
     }
 
+    private bool CanUseReceiveFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_receiveFolder);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            LogSaveFailed(_logger, Guid.Empty, ex.Message);
+            return false;
+        }
+    }
+
     private long? FreeSpace()
     {
         try
         {
-            var root = Path.GetPathRoot(Path.GetFullPath(_options.IncomingDirectory));
+            var root = Path.GetPathRoot(_receiveFolder);
             return root is null ? null : new DriveInfo(root).AvailableFreeSpace;
         }
         catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
@@ -1287,10 +1370,58 @@ public sealed partial class FileTransferService : BackgroundService
         }
     }
 
-    private string TemporaryPath(Guid transferId)
+    /// <summary>
+    /// Where a newly accepted file is written: on the same drive as where it will end up, so a large file needs
+    /// room on that drive only, and finishing it is a rename.
+    /// </summary>
+    private string PathForNewFile(Guid peerId, Guid transferId)
+    {
+        var folder = _receiveFolder;
+        if (string.Equals(folder, Path.GetFullPath(_options.DownloadsDirectory), StringComparison.OrdinalIgnoreCase))
+        {
+            return DefaultPartialPath(transferId);
+        }
+
+        var partials = Path.Combine(folder, PartialFolderName);
+        Directory.CreateDirectory(partials);
+        File.SetAttributes(partials, File.GetAttributes(partials) | FileAttributes.Hidden);
+        var path = Path.Combine(partials, $"{transferId:N}.part");
+        _store.SavePartialPath(peerId, transferId, path);
+        return path;
+    }
+
+    private string PartialPathOf(StoredTransfer transfer) => transfer.PartialPath ?? DefaultPartialPath(transfer.TransferId);
+
+    private string DefaultPartialPath(Guid transferId)
     {
         Directory.CreateDirectory(_options.IncomingDirectory);
         return Path.Combine(_options.IncomingDirectory, $"{transferId:N}.part");
+    }
+
+    private string FinalFolderOf(string partialPath)
+    {
+        var folder = Path.GetDirectoryName(partialPath);
+        return folder is not null && Path.GetFileName(folder) == PartialFolderName
+            ? Path.GetDirectoryName(folder)!
+            : _options.DownloadsDirectory;
+    }
+
+    private static void RemovePartialFolderIfEmpty(string partialPath)
+    {
+        var folder = Path.GetDirectoryName(partialPath);
+        if (folder is null || Path.GetFileName(folder) != PartialFolderName)
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(folder, recursive: false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Another file is still arriving, or something has the folder open. It's hidden and harmless.
+        }
     }
 
     private void DeleteQuietly(string path)
