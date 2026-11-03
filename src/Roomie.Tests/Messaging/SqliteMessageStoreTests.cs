@@ -313,9 +313,9 @@ public sealed class SqliteMessageStoreTests : IDisposable
         store.TryAddIncoming(Incoming());
         store.Dispose();
 
-        Assert.Equal(3, ReadUserVersion());
+        Assert.Equal(4, ReadUserVersion());
         Assert.Single(Open().GetConversation(Peer));
-        Assert.Equal(3, ReadUserVersion());
+        Assert.Equal(4, ReadUserVersion());
     }
 
     /// <summary>The exact schema 0.7.0 shipped, with a message in each state: real databases look like this.</summary>
@@ -361,7 +361,7 @@ public sealed class SqliteMessageStoreTests : IDisposable
         Assert.Null(store.GetConversation(Peer)[0].GroupId);
         Assert.False(store.TryAddIncoming(Incoming(read)));
         store.Dispose();
-        Assert.Equal(3, ReadUserVersion());
+        Assert.Equal(4, ReadUserVersion());
     }
 
     private const string GroupA = "group-a";

@@ -26,6 +26,7 @@ public static class RmpMessageTypes
 
     public const string FileOffer = "FILE_OFFER";
     public const string FileAccept = "FILE_ACCEPT";
+    public const string FileResume = "FILE_RESUME";
     public const string FileReject = "FILE_REJECT";
     public const string FileChunk = "FILE_CHUNK";
     public const string FileComplete = "FILE_COMPLETE";

@@ -15,8 +15,17 @@ public sealed class FileTransferOptions
     /// <summary>Where verified files end up.</summary>
     public required string DownloadsDirectory { get; init; }
 
-    /// <summary>Where files stay until they are verified. Emptied at startup.</summary>
+    /// <summary>Where files stay until they are verified. What a transfer still open needs survives a restart.</summary>
     public required string IncomingDirectory { get; init; }
+
+    /// <summary>The largest file this device will send.</summary>
+    public long MaxFileSizeBytes { get; init; } = RmpContentLimits.MaxFileSizeBytes;
+
+    /// <summary>
+    /// How much may arrive between forcing the file to disk and recording how far it got. A power cut loses at
+    /// most this much, and those bytes are simply sent again.
+    /// </summary>
+    public long CheckpointBytes { get; init; } = 64L * 1024 * 1024;
 
     /// <summary>Files moving at once with each device, in each direction (architecture.md §8).</summary>
     public int MaxActivePerDevice { get; init; } = 2;
@@ -39,8 +48,8 @@ public sealed record FileActionResult(Guid? TransferId, string? Error);
 
 /// <summary>
 /// One-to-one file transfer (architecture.md §8). Nothing is written until the receiver's user accepts, and a
-/// file reaches the downloads folder only after its hash matches. Interrupted transfers aren't resumed: both
-/// sides mark them failed, and the sender can send the file again.
+/// file reaches the downloads folder only after its hash matches. A lost connection or a restart only pauses a
+/// transfer: when the devices next connect, the receiver says how much it has, and the sender continues from there.
 /// </summary>
 public sealed partial class FileTransferService : BackgroundService
 {
@@ -63,6 +72,11 @@ public sealed partial class FileTransferService : BackgroundService
     private readonly Lock _gate = new();
     private readonly Dictionary<Guid, Receiving> _receiving = [];
     private readonly Dictionary<Guid, Sending> _sending = [];
+
+    // Answers that allow sending, each valid only on the session it arrived on. A transfer with no entry here, or
+    // one from an old session, must wait to hear how much the receiver has.
+    private readonly Dictionary<Guid, (Guid SessionId, long Offset)> _ready = [];
+    private readonly CancellationTokenSource _stopping = new();
     private readonly Dictionary<(Guid Peer, Guid Transfer), long> _progress = [];
     private long _lastProgressTicks;
 
@@ -82,7 +96,7 @@ public sealed partial class FileTransferService : BackgroundService
         _logger = logger;
 
         _registration = connections.Dispatcher.Register(
-            [RmpMessageTypes.FileOffer, RmpMessageTypes.FileAccept, RmpMessageTypes.FileReject, RmpMessageTypes.FileComplete, RmpMessageTypes.FileAck],
+            [RmpMessageTypes.FileOffer, RmpMessageTypes.FileAccept, RmpMessageTypes.FileResume, RmpMessageTypes.FileReject, RmpMessageTypes.FileComplete, RmpMessageTypes.FileAck],
             HandleMessageAsync);
         connections.Dispatcher.RegisterChunks(HandleChunkAsync);
         connections.SessionOpened += OnSessionOpened;
@@ -110,6 +124,7 @@ public sealed partial class FileTransferService : BackgroundService
 
         string sha256;
         long size;
+        long sourceWriteTicks;
         try
         {
             var info = new FileInfo(path);
@@ -119,10 +134,13 @@ public sealed partial class FileTransferService : BackgroundService
             }
 
             size = info.Length;
-            if (size > RmpContentLimits.MaxFileSizeBytes)
+            if (size > _options.MaxFileSizeBytes)
             {
-                return new FileActionResult(null, $"This file is too large. The limit is {RmpContentLimits.MaxFileSizeBytes / (1024 * 1024)} MB.");
+                return new FileActionResult(null, $"This file is too large. The limit is {_options.MaxFileSizeBytes / (1024 * 1024 * 1024)} GB.");
             }
+
+            // Taken before hashing, so a change made while hashing is noticed when sending starts.
+            sourceWriteTicks = info.LastWriteTimeUtc.Ticks;
 
             var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
             await using (stream.ConfigureAwait(false))
@@ -138,7 +156,7 @@ public sealed partial class FileTransferService : BackgroundService
 
         // The name sent is what any receiver will make safe anyway. Doing it here keeps it within the protocol's rules.
         var filename = SafeFilename.Create(Path.GetFileName(path));
-        var transfer = new StoredTransfer(Guid.CreateVersion7(_time.GetUtcNow()), peerId, MessageDirection.Outgoing, filename, size, sha256, OutgoingContentType, FileTransferState.Waiting, _time.GetUtcNow(), path);
+        var transfer = new StoredTransfer(Guid.CreateVersion7(_time.GetUtcNow()), peerId, MessageDirection.Outgoing, filename, size, sha256, OutgoingContentType, FileTransferState.Waiting, _time.GetUtcNow(), path, SourceWriteTicks: sourceWriteTicks);
         try
         {
             _store.AddTransfer(transfer);
@@ -187,7 +205,18 @@ public sealed partial class FileTransferService : BackgroundService
             }
 
             RaiseChanged();
-            await session.SendAsync(RmpMessageTypes.FileAccept, SessionPayloads.ToElement(new FileAcceptPayload(transferId)), cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await session.SendAsync(RmpMessageTypes.FileAccept, SessionPayloads.ToElement(new FileAcceptPayload(transferId)), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException)
+            {
+                // The answer is saved, so losing the connection now only pauses the transfer. A session may have
+                // replaced this one before this entry existed, so nothing else would pick it up.
+                LogFlushFailed(_logger, peerId, ex.Message);
+                _work.Writer.TryWrite(peerId);
+            }
+
             return new FileActionResult(transferId, null);
         }
         catch (MessageStoreException)
@@ -197,8 +226,8 @@ public sealed partial class FileTransferService : BackgroundService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
-            await AbandonReceivingAsync(transferId).ConfigureAwait(false);
-            FinishIncoming(peerId, transferId, FileTransferState.Failed, "Roomie couldn't start receiving this file.");
+            LogSaveFailed(_logger, transferId, ex.Message);
+            await FailReceivingAsync(peerId, transferId, FileTransferState.Failed, "Roomie couldn't start receiving this file.").ConfigureAwait(false);
             return new FileActionResult(transferId, "Roomie couldn't start receiving this file.");
         }
     }
@@ -243,9 +272,12 @@ public sealed partial class FileTransferService : BackgroundService
             }
             else
             {
-                await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+                // Recorded first, so nothing can start the transfer up again while its file is being removed.
                 _store.TryMoveTransfer(peerId, direction, transferId, FileTransferState.Canceled, null, null, OpenStates);
+                await AbandonReceivingAsync(transferId).ConfigureAwait(false);
             }
+
+            ForgetProgress(peerId, transferId);
 
             RaiseChanged();
         }
@@ -271,10 +303,28 @@ public sealed partial class FileTransferService : BackgroundService
         }
     }
 
+    /// <summary>Whether a transfer is waiting to continue, because the devices aren't connected or haven't caught up yet.</summary>
+    public bool IsPaused(StoredTransfer transfer)
+    {
+        ArgumentNullException.ThrowIfNull(transfer);
+        if (transfer.State is not (FileTransferState.Accepted or FileTransferState.Transferring))
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            return transfer.Direction == MessageDirection.Outgoing
+                ? !_sending.ContainsKey(transfer.TransferId) && !_ready.ContainsKey(transfer.TransferId)
+                : !_receiving.ContainsKey(transfer.TransferId);
+        }
+    }
+
     public override void Dispose()
     {
         _registration.Dispose();
         _connections.SessionOpened -= OnSessionOpened;
+        _stopping.Dispose();
         base.Dispose();
     }
 
@@ -295,24 +345,24 @@ public sealed partial class FileTransferService : BackgroundService
         await StopEverythingAsync().ConfigureAwait(false);
     }
 
-    /// <summary>A transfer doesn't survive a restart. Offers and unconfirmed endings can still be finished.</summary>
+    /// <summary>
+    /// Open transfers carry on after a restart. Anything in the incoming folder that none of them needs is a
+    /// leftover. A file being verified is checked again from the start, so it goes back a stage.
+    /// </summary>
     private void RecoverAfterRestart()
     {
         try
         {
-            foreach (var transfer in _store.GetOpenTransfers())
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var transfer in _store.GetOpenTransfers().Where(t => t is { Direction: MessageDirection.Incoming, State: FileTransferState.Accepted or FileTransferState.Transferring or FileTransferState.Verifying }))
             {
-                var interrupted = transfer.Direction == MessageDirection.Outgoing
-                    ? transfer.State is FileTransferState.Accepted or FileTransferState.Transferring
-                    : transfer.State is FileTransferState.Accepted or FileTransferState.Transferring or FileTransferState.Verifying;
-                if (interrupted)
-                {
-                    _store.UpdateTransfer(transfer.PeerId, transfer.Direction, transfer.TransferId, FileTransferState.Failed, transfer.LocalPath, "Roomie closed before this finished.");
-                }
+                keep.Add($"{transfer.TransferId:N}.part");
+                _store.TryMoveTransfer(transfer.PeerId, MessageDirection.Incoming, transfer.TransferId, FileTransferState.Transferring, null, null, FileTransferState.Verifying);
+                _progress[(transfer.PeerId, transfer.TransferId)] = transfer.ReceivedBytes;
             }
 
             Directory.CreateDirectory(_options.IncomingDirectory);
-            foreach (var leftover in Directory.GetFiles(_options.IncomingDirectory, "*.part"))
+            foreach (var leftover in Directory.GetFiles(_options.IncomingDirectory, "*.part").Where(f => !keep.Contains(Path.GetFileName(f))))
             {
                 File.Delete(leftover);
             }
@@ -333,38 +383,34 @@ public sealed partial class FileTransferService : BackgroundService
             TaskScheduler.Default).Unwrap();
     }
 
-    /// <summary>Anything that was moving over this session can't continue on another, because there is no resuming.</summary>
+    /// <summary>What was moving over this session pauses, keeping what arrived. Sends on it end by themselves: their next write fails.</summary>
     private async Task OnSessionClosedAsync(PeerSession session)
     {
-        List<Guid> receiving;
+        List<Receiving> receiving;
         lock (_gate)
         {
-            receiving = _receiving.Where(r => r.Value.SessionId == session.SessionId).Select(r => r.Key).ToList();
-        }
-
-        // Sends on this session end by themselves: their next write fails.
-
-        foreach (var id in receiving)
-        {
-            await AbandonReceivingAsync(id).ConfigureAwait(false);
-            FinishIncoming(session.RemoteDeviceId, id, FileTransferState.Failed, "The connection was lost. Ask for the file to be sent again.");
-        }
-
-        // Accepted, but its turn hadn't come.
-        try
-        {
-            foreach (var waiting in _store.GetOpenTransfers().Where(t => t is { Direction: MessageDirection.Outgoing, State: FileTransferState.Accepted } && t.PeerId == session.RemoteDeviceId))
+            receiving = _receiving.Values.Where(r => r.SessionId == session.SessionId && !r.IsVerifying).ToList();
+            foreach (var id in _ready.Where(r => r.Value.SessionId == session.SessionId).Select(r => r.Key).ToList())
             {
-                FinishOutgoing(waiting, FileTransferState.Failed, "The connection was lost. Send the file again.");
+                _ready.Remove(id);
             }
         }
-        catch (MessageStoreException)
+
+        foreach (var item in receiving)
         {
-            // Restarting clears these. The store logged the failure.
+            await PauseReceivingAsync(item).ConfigureAwait(false);
         }
+
+        RaiseChanged();
+
+        // A new session may have opened while this one was closing, and couldn't continue these until now.
+        _work.Writer.TryWrite(session.RemoteDeviceId);
     }
 
-    /// <summary>Sends offers and endings the device may have missed. Repeats are harmless: the receiver knows each transfer by ID.</summary>
+    /// <summary>
+    /// Sends offers and endings the device may have missed, and asks for the rest of anything paused. Repeats are
+    /// harmless: the receiver knows each transfer by ID.
+    /// </summary>
     private async Task FlushAsync(Guid peerId, CancellationToken cancellationToken)
     {
         if (!_connections.TryGetSession(peerId, out var session) || !session.IsTrusted || !session.Supports(RmpCapabilities.FileTransfer))
@@ -377,9 +423,16 @@ public sealed partial class FileTransferService : BackgroundService
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(_options.WriteTimeout);
 
-            foreach (var transfer in _store.GetOpenTransfers().Where(t => t.PeerId == peerId && t.Direction == MessageDirection.Outgoing))
+            foreach (var transfer in _store.GetOpenTransfers().Where(t => t.PeerId == peerId))
             {
-                if (transfer.State is FileTransferState.Waiting or FileTransferState.Offered)
+                if (transfer.Direction == MessageDirection.Incoming)
+                {
+                    if (transfer.State is FileTransferState.Accepted or FileTransferState.Transferring)
+                    {
+                        await ResumeReceivingAsync(session, transfer, timeout.Token).ConfigureAwait(false);
+                    }
+                }
+                else if (transfer.State is FileTransferState.Waiting or FileTransferState.Offered)
                 {
                     // Recorded before sending, because the answer can arrive before the send returns. An offer
                     // that doesn't get through is sent again on the next session either way.
@@ -395,6 +448,12 @@ public sealed partial class FileTransferService : BackgroundService
                 else if (transfer.State == FileTransferState.Verifying)
                 {
                     await session.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(transfer.TransferId)), timeout.Token).ConfigureAwait(false);
+                }
+                else if (IsPaused(transfer))
+                {
+                    // Paused here. If it ended there while the devices were apart, the answer to this says so.
+                    var offer = new FileOfferPayload(transfer.TransferId, transfer.Filename, transfer.FileSize, transfer.Sha256, transfer.ContentType);
+                    await session.SendAsync(RmpMessageTypes.FileOffer, SessionPayloads.ToElement(offer), timeout.Token).ConfigureAwait(false);
                 }
             }
         }
@@ -424,6 +483,10 @@ public sealed partial class FileTransferService : BackgroundService
                 await OnAcceptAsync(session, accept.TransferId, cancellationToken).ConfigureAwait(false);
                 break;
 
+            case RmpMessageTypes.FileResume when FilePayloadReader.TryRead<FileResumePayload>(message.Payload, out var resume):
+                await OnResumeAsync(session, resume, cancellationToken).ConfigureAwait(false);
+                break;
+
             case RmpMessageTypes.FileReject when FilePayloadReader.TryRead<FileRejectPayload>(message.Payload, out var reject):
                 await OnRejectAsync(session, reject).ConfigureAwait(false);
                 break;
@@ -448,7 +511,11 @@ public sealed partial class FileTransferService : BackgroundService
             {
                 await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(offer.TransferId, FileRejectReasons.Declined)), cancellationToken).ConfigureAwait(false);
             }
-            else if (known.State is FileTransferState.Failed or FileTransferState.Canceled)
+            else if (known.State == FileTransferState.Canceled)
+            {
+                await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(offer.TransferId, FileRejectReasons.Canceled)), cancellationToken).ConfigureAwait(false);
+            }
+            else if (known.State == FileTransferState.Failed)
             {
                 await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(offer.TransferId, FileRejectReasons.Failed)), cancellationToken).ConfigureAwait(false);
             }
@@ -475,14 +542,56 @@ public sealed partial class FileTransferService : BackgroundService
 
     private async Task OnAcceptAsync(PeerSession session, Guid transferId, CancellationToken cancellationToken)
     {
-        if (_store.GetTransfer(session.RemoteDeviceId, MessageDirection.Outgoing, transferId) is not { State: FileTransferState.Offered or FileTransferState.Waiting } transfer)
+        if (_store.GetTransfer(session.RemoteDeviceId, MessageDirection.Outgoing, transferId) is not { State: FileTransferState.Offered or FileTransferState.Waiting or FileTransferState.Accepted or FileTransferState.Transferring } transfer)
         {
             // Stopped here while the offer waited there. Without this, the other side would wait forever.
             await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(transferId, FileRejectReasons.Canceled)), cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        if (_store.TryMoveTransfer(transfer.PeerId, MessageDirection.Outgoing, transferId, FileTransferState.Accepted, transfer.LocalPath, null, FileTransferState.Offered, FileTransferState.Waiting))
+        BeginSending(session, transfer, 0);
+    }
+
+    /// <summary>The receiver's word for how much it has. Sending from there only repeats what it already agreed to receive.</summary>
+    private async Task OnResumeAsync(PeerSession session, FileResumePayload resume, CancellationToken cancellationToken)
+    {
+        var known = _store.GetTransfer(session.RemoteDeviceId, MessageDirection.Outgoing, resume.TransferId);
+        if (known is not { State: < FileTransferState.Completed } transfer)
+        {
+            var reason = known?.State switch
+            {
+                FileTransferState.Canceled => FileRejectReasons.Canceled,
+                FileTransferState.Rejected => FileRejectReasons.Declined,
+                _ => FileRejectReasons.Failed,
+            };
+            await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(resume.TransferId, reason)), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (resume.Offset > transfer.FileSize)
+        {
+            FinishOutgoing(transfer, FileTransferState.Failed, "The other device reported more of this file than exists.");
+            await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(resume.TransferId, FileRejectReasons.Failed)), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        BeginSending(session, transfer, resume.Offset);
+    }
+
+    private void BeginSending(PeerSession session, StoredTransfer transfer, long offset)
+    {
+        lock (_gate)
+        {
+            _ready[transfer.TransferId] = (session.SessionId, offset);
+
+            // A send still running on a dead session gives way, and the new one starts when it has finished.
+            if (_sending.TryGetValue(transfer.TransferId, out var running))
+            {
+                running.Cancellation.Cancel();
+            }
+        }
+
+        if (_store.TryMoveTransfer(transfer.PeerId, MessageDirection.Outgoing, transfer.TransferId, FileTransferState.Accepted, transfer.LocalPath, null, FileTransferState.Offered, FileTransferState.Waiting, FileTransferState.Accepted, FileTransferState.Transferring, FileTransferState.Verifying))
         {
             RaiseChanged();
             StartNextSends(session);
@@ -507,9 +616,8 @@ public sealed partial class FileTransferService : BackgroundService
 
         if (_store.GetTransfer(peerId, MessageDirection.Incoming, reject.TransferId) is { State: < FileTransferState.Completed })
         {
-            await AbandonReceivingAsync(reject.TransferId).ConfigureAwait(false);
-            FinishIncoming(peerId, reject.TransferId, reject.Reason == FileRejectReasons.Canceled ? FileTransferState.Canceled : FileTransferState.Failed,
-                reject.Reason == FileRejectReasons.Canceled ? null : "The other device stopped sending this file.");
+            await FailReceivingAsync(peerId, reject.TransferId, reject.Reason == FileRejectReasons.Canceled ? FileTransferState.Canceled : FileTransferState.Failed,
+                reject.Reason == FileRejectReasons.Canceled ? null : "The other device stopped sending this file.").ConfigureAwait(false);
         }
     }
 
@@ -522,7 +630,7 @@ public sealed partial class FileTransferService : BackgroundService
         }
 
         var peerId = session.RemoteDeviceId;
-        if (receiving is null || receiving.PeerId != peerId)
+        if (receiving is null || receiving.PeerId != peerId || receiving.SessionId != session.SessionId)
         {
             // Chunks already on the way when a transfer ended are expected, and aren't an offense.
             if (_store.GetTransfer(peerId, MessageDirection.Incoming, chunk.TransferId) is { State: >= FileTransferState.Completed })
@@ -559,7 +667,13 @@ public sealed partial class FileTransferService : BackgroundService
                 await receiving.Stream.WriteAsync(chunk.Data, cancellationToken).ConfigureAwait(false);
                 receiving.Received += chunk.Data.Length;
                 receiving.NextSequence++;
+                receiving.ResumePending = false;
                 SetProgress(peerId, chunk.TransferId, receiving.Received);
+                if (receiving.Received - receiving.Checkpointed >= _options.CheckpointBytes)
+                {
+                    await CheckpointAsync(receiving).ConfigureAwait(false);
+                }
+
                 if (!receiving.HasStarted)
                 {
                     receiving.HasStarted = true;
@@ -579,8 +693,7 @@ public sealed partial class FileTransferService : BackgroundService
 
         if (problem is not null)
         {
-            await AbandonReceivingAsync(chunk.TransferId).ConfigureAwait(false);
-            FinishIncoming(peerId, chunk.TransferId, FileTransferState.Failed, problem);
+            await FailReceivingAsync(peerId, chunk.TransferId, FileTransferState.Failed, problem).ConfigureAwait(false);
             await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(chunk.TransferId, FileRejectReasons.Failed)), cancellationToken).ConfigureAwait(false);
         }
     }
@@ -604,15 +717,20 @@ public sealed partial class FileTransferService : BackgroundService
             _receiving.TryGetValue(transferId, out receiving);
         }
 
-        if (receiving is null || receiving.PeerId != peerId || known.State == FileTransferState.Verifying)
+        if (receiving is null || receiving.PeerId != peerId || receiving.SessionId != session.SessionId || known.State == FileTransferState.Verifying)
         {
             return;
         }
 
         if (receiving.Received != known.FileSize)
         {
-            await AbandonReceivingAsync(transferId).ConfigureAwait(false);
-            FinishIncoming(peerId, transferId, FileTransferState.Failed, "The file ended before all of it arrived.");
+            // The sender finished on an earlier session and is asking how it ended. FILE_RESUME is its answer.
+            if (receiving.ResumePending)
+            {
+                return;
+            }
+
+            await FailReceivingAsync(peerId, transferId, FileTransferState.Failed, "The file ended before all of it arrived.").ConfigureAwait(false);
             await session.SendAsync(RmpMessageTypes.FileAck, SessionPayloads.ToElement(new FileAckPayload(transferId, false)), cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -622,14 +740,17 @@ public sealed partial class FileTransferService : BackgroundService
             return;
         }
 
+        receiving.IsVerifying = true;
         RaiseChanged();
 
-        // Hashing up to 100 MB must not hold up this session's read loop.
-        _ = Task.Run(() => VerifyAsync(session, receiving, cancellationToken), CancellationToken.None);
+        // Hashing a large file must not hold up this session's read loop, and doesn't need the session: losing
+        // the connection now only delays telling the sender how it went.
+        _ = Task.Run(() => VerifyAsync(receiving), CancellationToken.None);
     }
 
-    private async Task VerifyAsync(PeerSession session, Receiving receiving, CancellationToken cancellationToken)
+    private async Task VerifyAsync(Receiving receiving)
     {
+        var cancellationToken = _stopping.Token;
         var peerId = receiving.PeerId;
         var transferId = receiving.Offer.TransferId;
         var verified = false;
@@ -643,8 +764,8 @@ public sealed partial class FileTransferService : BackgroundService
                     return;
                 }
 
-                await receiving.Stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                receiving.Stream.Flush(flushToDisk: true);
+                // Recorded first: if Roomie closes during the check, the check starts again and nothing is sent twice.
+                await CheckpointAsync(receiving).ConfigureAwait(false);
                 receiving.Stream.Position = 0;
 
                 // The bytes that reached the disk, read back: not a running total of what was passed to it.
@@ -683,25 +804,18 @@ public sealed partial class FileTransferService : BackgroundService
         {
             verified = false;
             LogSaveFailed(_logger, transferId, ex.Message);
-            DeleteQuietly(receiving.TemporaryPath);
-            FinishIncoming(peerId, transferId, FileTransferState.Failed, "Roomie couldn't save this file. The disk may be full.");
+            await FailReceivingAsync(peerId, transferId, FileTransferState.Failed, "Roomie couldn't save this file. The disk may be full.").ConfigureAwait(false);
         }
 
-        try
-        {
-            await session.SendAsync(RmpMessageTypes.FileAck, SessionPayloads.ToElement(new FileAckPayload(transferId, verified)), cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or OperationCanceledException)
-        {
-            // The sender asks how it ended on its next session.
-            LogFlushFailed(_logger, peerId, ex.Message);
-        }
+        // Goes to whichever session is open by now. If none is, the sender asks how it ended on its next one.
+        await TellAsync(peerId, RmpMessageTypes.FileAck, new FileAckPayload(transferId, verified), CancellationToken.None).ConfigureAwait(false);
     }
 
     private void OnAck(PeerSession session, FileAckPayload ack)
     {
-        if (_store.GetTransfer(session.RemoteDeviceId, MessageDirection.Outgoing, ack.TransferId) is { State: FileTransferState.Verifying } transfer)
+        if (_store.GetTransfer(session.RemoteDeviceId, MessageDirection.Outgoing, ack.TransferId) is { State: FileTransferState.Accepted or FileTransferState.Transferring or FileTransferState.Verifying } transfer)
         {
+            StopSending(ack.TransferId);
             FinishOutgoing(transfer, ack.Verified ? FileTransferState.Completed : FileTransferState.Failed,
                 ack.Verified ? null : "The other device didn't receive this file intact. Send it again.");
         }
@@ -721,13 +835,15 @@ public sealed partial class FileTransferService : BackgroundService
             }
 
             next = _store.GetOpenTransfers()
-                .Where(t => t is { Direction: MessageDirection.Outgoing, State: FileTransferState.Accepted } && t.PeerId == peerId && !_sending.ContainsKey(t.TransferId))
+                .Where(t => t is { Direction: MessageDirection.Outgoing, State: FileTransferState.Accepted } && t.PeerId == peerId && !_sending.ContainsKey(t.TransferId)
+                    && _ready.TryGetValue(t.TransferId, out var ready) && ready.SessionId == session.SessionId)
                 .OrderBy(t => t.CreatedAt)
                 .Take(slots)
                 .ToList();
             foreach (var transfer in next)
             {
-                _sending[transfer.TransferId] = new Sending(peerId, session.SessionId, new CancellationTokenSource());
+                _ready.Remove(transfer.TransferId, out var answer);
+                _sending[transfer.TransferId] = new Sending(peerId, session.SessionId, new CancellationTokenSource(), answer.Offset);
             }
         }
 
@@ -760,10 +876,18 @@ public sealed partial class FileTransferService : BackgroundService
             var stream = new FileStream(transfer.LocalPath!, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
             await using (stream.ConfigureAwait(false))
             {
+                // A changed file would fail its hash at the very end, after everything had been sent for nothing.
+                if (stream.Length != transfer.FileSize || (transfer.SourceWriteTicks != 0 && File.GetLastWriteTimeUtc(transfer.LocalPath!).Ticks != transfer.SourceWriteTicks))
+                {
+                    failure = "The file changed after it was offered. Send it again.";
+                }
+
                 var buffer = new byte[FileChunk.MaxDataLength];
                 uint sequence = 0;
-                long sent = 0;
-                while (sent < transfer.FileSize)
+                var sent = sending.Offset;
+                stream.Position = Math.Min(sent, stream.Length);
+                SetProgress(transfer.PeerId, transferId, sent);
+                while (failure is null && sent < transfer.FileSize)
                 {
                     var wanted = (int)Math.Min(buffer.Length, transfer.FileSize - sent);
                     var read = await stream.ReadAtLeastAsync(buffer.AsMemory(0, wanted), wanted, throwOnEndOfStream: false, cancellation).ConfigureAwait(false);
@@ -800,15 +924,17 @@ public sealed partial class FileTransferService : BackgroundService
         }
         catch (OperationCanceledException)
         {
-            // A cancel or refusal already recorded the outcome. Only shutting down hasn't, and the next start does.
+            // A cancel or refusal already recorded the outcome. Otherwise this is paused or has been replaced.
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
+        catch (ConnectionLostException ex)
         {
-            // Once all the data has gone, the next session can still find out how it ended.
-            if (_store.GetTransfer(transfer.PeerId, MessageDirection.Outgoing, transferId) is { State: FileTransferState.Transferring })
-            {
-                failure = "Sending stopped: the file couldn't be read, or the connection was lost. Send it again.";
-            }
+            // Paused. The receiver says where to continue from when the devices next connect.
+            LogFlushFailed(_logger, transfer.PeerId, ex.Message);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogFlushFailed(_logger, transfer.PeerId, ex.Message);
+            failure = "Sending stopped: the file couldn't be read. Send it again.";
         }
         catch (MessageStoreException ex)
         {
@@ -819,7 +945,6 @@ public sealed partial class FileTransferService : BackgroundService
             lock (_gate)
             {
                 _sending.Remove(transferId);
-                _progress.Remove((transfer.PeerId, transferId));
             }
 
             sending.Cancellation.Dispose();
@@ -831,9 +956,10 @@ public sealed partial class FileTransferService : BackgroundService
             await TellAsync(transfer.PeerId, RmpMessageTypes.FileReject, new FileRejectPayload(transferId, FileRejectReasons.Failed), CancellationToken.None).ConfigureAwait(false);
         }
 
-        if (!session.IsClosed)
+        // Not always the session this ran on: one that replaced it may have been waiting for this to end.
+        if (_connections.TryGetSession(transfer.PeerId, out var current))
         {
-            StartNextSends(session);
+            StartNextSends(current);
         }
 
         RaiseChanged();
@@ -851,7 +977,11 @@ public sealed partial class FileTransferService : BackgroundService
         {
             LogWriteTimedOut(_logger, session.RemoteDeviceId);
             _ = session.CloseAsync(null, "Sending timed out.");
-            throw new IOException("Sending timed out.");
+            throw new ConnectionLostException("Sending timed out.");
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException)
+        {
+            throw new ConnectionLostException(ex.Message);
         }
     }
 
@@ -866,6 +996,122 @@ public sealed partial class FileTransferService : BackgroundService
         }
     }
 
+    /// <summary>Connects a paused incoming transfer to this session, and tells the sender where to continue from.</summary>
+    private async Task ResumeReceivingAsync(PeerSession session, StoredTransfer transfer, CancellationToken cancellationToken)
+    {
+        var transferId = transfer.TransferId;
+        Receiving? existing;
+        lock (_gate)
+        {
+            _receiving.TryGetValue(transferId, out existing);
+        }
+
+        if (existing is not null)
+        {
+            if (existing.SessionId == session.SessionId || existing.IsVerifying)
+            {
+                return;
+            }
+
+            await PauseReceivingAsync(existing).ConfigureAwait(false);
+        }
+
+        // Anything past the last recorded point may not have reached the disk, so it is cut off and sent again.
+        var saved = _store.GetTransfer(transfer.PeerId, MessageDirection.Incoming, transferId)?.ReceivedBytes ?? 0;
+        var path = TemporaryPath(transferId);
+        Receiving receiving;
+        try
+        {
+            var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 81920, FileOptions.Asynchronous);
+            var offset = Math.Min(saved, stream.Length);
+            stream.SetLength(offset);
+            stream.Position = offset;
+            receiving = new Receiving(transfer.PeerId, session.SessionId, transfer, stream, path) { Received = offset, Checkpointed = offset, ResumePending = true };
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogSaveFailed(_logger, transferId, ex.Message);
+            await FailReceivingAsync(transfer.PeerId, transferId, FileTransferState.Failed, "Roomie couldn't continue saving this file.").ConfigureAwait(false);
+            await session.SendAsync(RmpMessageTypes.FileReject, SessionPayloads.ToElement(new FileRejectPayload(transferId, FileRejectReasons.Failed)), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        lock (_gate)
+        {
+            _receiving[transferId] = receiving;
+        }
+
+        // Checked after registering: whatever ends a transfer records that first and then removes what's registered.
+        if (_store.GetTransfer(transfer.PeerId, MessageDirection.Incoming, transferId) is not { State: FileTransferState.Accepted or FileTransferState.Transferring })
+        {
+            await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+            return;
+        }
+
+        SetProgress(transfer.PeerId, transferId, receiving.Received);
+        RaiseChanged();
+        await session.SendAsync(RmpMessageTypes.FileResume, SessionPayloads.ToElement(new FileResumePayload(transferId, receiving.Received)), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Forces what arrived to disk, then records how far it got. Call while holding the transfer's lock.</summary>
+    private async Task CheckpointAsync(Receiving receiving)
+    {
+        await receiving.Stream.FlushAsync().ConfigureAwait(false);
+        await Task.Run(() => receiving.Stream.Flush(flushToDisk: true)).ConfigureAwait(false);
+        try
+        {
+            _store.SaveReceivedBytes(receiving.PeerId, receiving.Offer.TransferId, receiving.Received);
+            receiving.Checkpointed = receiving.Received;
+        }
+        catch (MessageStoreException)
+        {
+            // Continuing from the previous record only sends a little again. The store logged the failure.
+        }
+    }
+
+    /// <summary>Closes the temporary file and keeps it, with a record of how far it got.</summary>
+    private async Task PauseReceivingAsync(Receiving receiving)
+    {
+        await receiving.Lock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!receiving.IsClosed)
+            {
+                receiving.IsClosed = true;
+                try
+                {
+                    await CheckpointAsync(receiving).ConfigureAwait(false);
+                    await receiving.Stream.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+                {
+                    // The last record still stands, and what came after it is sent again.
+                    LogSaveFailed(_logger, receiving.Offer.TransferId, ex.Message);
+                }
+            }
+        }
+        finally
+        {
+            receiving.Lock.Release();
+        }
+
+        lock (_gate)
+        {
+            if (_receiving.TryGetValue(receiving.Offer.TransferId, out var current) && ReferenceEquals(current, receiving))
+            {
+                _receiving.Remove(receiving.Offer.TransferId);
+            }
+        }
+    }
+
+    /// <summary>Ends a transfer and removes what arrived, in that order so nothing can start it up again in between.</summary>
+    private async Task FailReceivingAsync(Guid peerId, Guid transferId, FileTransferState state, string? failure)
+    {
+        FinishIncoming(peerId, transferId, state, failure);
+        await AbandonReceivingAsync(transferId).ConfigureAwait(false);
+    }
+
+    /// <summary>Removes the temporary file, including that of a paused transfer, which nothing has open.</summary>
     private async Task AbandonReceivingAsync(Guid transferId)
     {
         Receiving? receiving;
@@ -874,48 +1120,44 @@ public sealed partial class FileTransferService : BackgroundService
             _receiving.Remove(transferId, out receiving);
         }
 
-        if (receiving is null)
+        if (receiving is not null)
         {
-            return;
-        }
-
-        lock (_gate)
-        {
-            _progress.Remove((receiving.PeerId, transferId));
-        }
-
-        await receiving.Lock.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            if (!receiving.IsClosed)
+            await receiving.Lock.WaitAsync().ConfigureAwait(false);
+            try
             {
-                receiving.IsClosed = true;
-                await receiving.Stream.DisposeAsync().ConfigureAwait(false);
+                if (!receiving.IsClosed)
+                {
+                    receiving.IsClosed = true;
+                    await receiving.Stream.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                receiving.Lock.Release();
             }
         }
-        finally
-        {
-            receiving.Lock.Release();
-        }
 
-        DeleteQuietly(receiving.TemporaryPath);
+        DeleteQuietly(TemporaryPath(transferId));
     }
 
+    /// <summary>Everything open pauses, so it can continue after the next start.</summary>
     private async Task StopEverythingAsync()
     {
-        List<Guid> receiving;
+        await _stopping.CancelAsync().ConfigureAwait(false);
+
+        List<Receiving> receiving;
         lock (_gate)
         {
-            receiving = [.. _receiving.Keys];
+            receiving = [.. _receiving.Values];
             foreach (var sending in _sending.Values)
             {
                 sending.Cancellation.Cancel();
             }
         }
 
-        foreach (var id in receiving)
+        foreach (var item in receiving)
         {
-            await AbandonReceivingAsync(id).ConfigureAwait(false);
+            await PauseReceivingAsync(item).ConfigureAwait(false);
         }
     }
 
@@ -930,6 +1172,7 @@ public sealed partial class FileTransferService : BackgroundService
             // Restarting clears this. The store logged the failure.
         }
 
+        ForgetProgress(peerId, transferId);
         RaiseChanged();
     }
 
@@ -944,7 +1187,17 @@ public sealed partial class FileTransferService : BackgroundService
             // Restarting clears this. The store logged the failure.
         }
 
+        ForgetProgress(transfer.PeerId, transfer.TransferId);
         RaiseChanged();
+    }
+
+    private void ForgetProgress(Guid peerId, Guid transferId)
+    {
+        lock (_gate)
+        {
+            _progress.Remove((peerId, transferId));
+            _ready.Remove(transferId);
+        }
     }
 
     private async Task TellAsync<T>(Guid peerId, string type, T payload, CancellationToken cancellationToken)
@@ -1071,6 +1324,14 @@ public sealed partial class FileTransferService : BackgroundService
 
         public long Received { get; set; }
 
+        /// <summary>How much is recorded as safely on disk.</summary>
+        public long Checkpointed { get; set; }
+
+        /// <summary>FILE_RESUME went out on this session, and no chunk has answered it yet.</summary>
+        public bool ResumePending { get; set; }
+
+        public bool IsVerifying { get; set; }
+
         public uint NextSequence { get; set; }
 
         public bool HasStarted { get; set; }
@@ -1078,7 +1339,10 @@ public sealed partial class FileTransferService : BackgroundService
         public bool IsClosed { get; set; }
     }
 
-    private sealed record Sending(Guid PeerId, Guid SessionId, CancellationTokenSource Cancellation);
+    private sealed record Sending(Guid PeerId, Guid SessionId, CancellationTokenSource Cancellation, long Offset);
+
+    /// <summary>A write failed: the transfer pauses, unlike when the file itself can't be read.</summary>
+    private sealed class ConnectionLostException(string message) : Exception(message);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Couldn't finish cleaning up after a restart")]
     private static partial void LogRecoveryFailed(ILogger logger, Exception exception);

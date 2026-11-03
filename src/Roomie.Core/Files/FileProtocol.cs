@@ -12,6 +12,12 @@ namespace Roomie.Core.Files;
 public sealed record FileAcceptPayload(Guid TransferId);
 
 /// <summary>
+/// <c>FILE_RESUME</c>: from the receiver, after a connection or restart: send the rest, starting at this byte.
+/// Chunk sequence numbers start again from 0.
+/// </summary>
+public sealed record FileResumePayload(Guid TransferId, long Offset);
+
+/// <summary>
 /// <c>FILE_REJECT</c>: this transfer is over, from either side, at any stage. The reason is one of
 /// <see cref="FileRejectReasons"/>, so what the user reads is never text a peer chose.
 /// </summary>
@@ -61,6 +67,8 @@ public enum FileTransferState
 
 /// <param name="Filename">Sender: the source file's name. Receiver: already made safe by <see cref="SafeFilename"/>.</param>
 /// <param name="LocalPath">Sender: the source file. Receiver: where it was saved, once verified.</param>
+/// <param name="ReceivedBytes">Receiver: how much of the file is known to be safely on disk.</param>
+/// <param name="SourceWriteTicks">Sender: when the source file last changed, as it was when hashed. 0 if unknown.</param>
 public sealed record StoredTransfer(
     Guid TransferId,
     Guid PeerId,
@@ -72,7 +80,9 @@ public sealed record StoredTransfer(
     FileTransferState State,
     DateTimeOffset CreatedAt,
     string? LocalPath = null,
-    string? Failure = null);
+    string? Failure = null,
+    long ReceivedBytes = 0,
+    long SourceWriteTicks = 0);
 
 /// <summary>Transfer records. A transfer belongs to one device and direction, so no peer can touch another's. Methods throw <see cref="MessageStoreException"/> if the store fails.</summary>
 public interface IFileTransferStore
@@ -95,6 +105,9 @@ public interface IFileTransferStore
     /// </summary>
     /// <returns>False if the transfer has moved on, and nothing changed.</returns>
     bool TryMoveTransfer(Guid peerId, MessageDirection direction, Guid transferId, FileTransferState state, string? localPath, string? failure, params FileTransferState[] from);
+
+    /// <summary>Records how much of an incoming file is safely on disk, so a transfer can continue from there.</summary>
+    void SaveReceivedBytes(Guid peerId, Guid transferId, long receivedBytes);
 }
 
 /// <summary>One binary chunk (architecture.md §8): transfer ID, sequence number, data length, data.</summary>
@@ -145,6 +158,11 @@ public static class FilePayloads
 {
     public static RmpPayloadCheck CheckAccept(JsonElement payload) =>
         SessionPayloads.TryDeserialize<FileAcceptPayload>(payload) is { TransferId: var id } && id != Guid.Empty ? RmpPayloadCheck.Valid : RmpPayloadCheck.Malformed;
+
+    public static RmpPayloadCheck CheckResume(JsonElement payload) =>
+        SessionPayloads.TryDeserialize<FileResumePayload>(payload) is { } resume && resume.TransferId != Guid.Empty && resume.Offset >= 0
+            ? RmpPayloadCheck.Valid
+            : RmpPayloadCheck.Malformed;
 
     public static RmpPayloadCheck CheckReject(JsonElement payload) =>
         SessionPayloads.TryDeserialize<FileRejectPayload>(payload) is { } reject && reject.TransferId != Guid.Empty

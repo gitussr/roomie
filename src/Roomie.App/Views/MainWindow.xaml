@@ -482,8 +482,20 @@
                             <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="16,4" VerticalAlignment="Bottom"
                                     Content="Send" FontWeight="SemiBold" Command="{Binding Chat.SendCommand}" />
                             <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="10,4" VerticalAlignment="Bottom"
-                                    Content="Send file…" Command="{Binding Chat.SendFileCommand}"
-                                    Visibility="{Binding Chat.IsDirect, Converter={StaticResource BoolToVisibility}}" />
+                                    Command="{Binding Chat.SendFileCommand}"
+                                    Visibility="{Binding Chat.IsDirect, Converter={StaticResource BoolToVisibility}}">
+                                <!-- Hashing a file of several GB takes a while before the offer appears. -->
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                        <Setter Property="Content" Value="Send file…" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Chat.IsPreparingFile}" Value="True">
+                                                <Setter Property="Content" Value="Checking file…" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
                             <TextBox x:Name="Composer" Text="{Binding Chat.Draft, UpdateSourceTrigger=PropertyChanged}"
                                      IsEnabled="{Binding Chat.CanCompose}" AcceptsReturn="True" TextWrapping="Wrap"
                                      MaxHeight="120" MinHeight="28" Padding="4" VerticalContentAlignment="Center"

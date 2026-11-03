@@ -191,7 +191,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
                 Files.Insert(Math.Min(i, Files.Count), item);
             }
 
-            item.Update(transfer, files.GetProgress(peerId, transfer.TransferId));
+            item.Update(transfer, files.GetProgress(peerId, transfer.TransferId), files.IsPaused(transfer));
         }
 
         HasFiles = Files.Count > 0;
@@ -209,7 +209,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
             return;
         }
 
-        var dialog = new OpenFileDialog { Title = "Choose a file to send (100 MB at most)", CheckFileExists = true };
+        var dialog = new OpenFileDialog { Title = "Choose a file to send", CheckFileExists = true };
         if (dialog.ShowDialog() == true)
         {
             await StartSendingAsync(peerId, dialog.FileName);

@@ -47,7 +47,7 @@ public sealed partial class FileTransferItem(Guid transferId, Guid peerId, Messa
     [ObservableProperty]
     private bool _canSendAgain;
 
-    public void Update(StoredTransfer transfer, long moved)
+    public void Update(StoredTransfer transfer, long moved, bool isPaused)
     {
         ArgumentNullException.ThrowIfNull(transfer);
         var incoming = transfer.Direction == MessageDirection.Incoming;
@@ -67,6 +67,8 @@ public sealed partial class FileTransferItem(Guid transferId, Guid peerId, Messa
 
         Status = transfer.State switch
         {
+            _ when isPaused && moved > 0 => $"Paused at {FormatSize(moved)} of {size} · Continues by itself when this device is connected",
+            _ when isPaused => $"{size} · Paused · Continues by itself when this device is connected",
             FileTransferState.Waiting => $"{size} · Will be offered when this device is connected",
             FileTransferState.Offered => incoming ? $"{size} · Offered to you" : $"{size} · Waiting for them to accept",
             FileTransferState.Accepted => $"{size} · Starting",
@@ -84,6 +86,7 @@ public sealed partial class FileTransferItem(Guid transferId, Guid peerId, Messa
     {
         < 1024 => string.Create(CultureInfo.CurrentCulture, $"{bytes} bytes"),
         < 1024 * 1024 => string.Create(CultureInfo.CurrentCulture, $"{bytes / 1024d:0.#} KB"),
-        _ => string.Create(CultureInfo.CurrentCulture, $"{bytes / (1024d * 1024):0.#} MB"),
+        < 1024 * 1024 * 1024 => string.Create(CultureInfo.CurrentCulture, $"{bytes / (1024d * 1024):0.#} MB"),
+        _ => string.Create(CultureInfo.CurrentCulture, $"{bytes / (1024d * 1024 * 1024):0.##} GB"),
     };
 }

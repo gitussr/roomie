@@ -544,7 +544,7 @@ Separate content limits are checked after parsing:
 | Text message body | 16 KiB UTF-8    |
 | File metadata     | 16 KiB          |
 | File chunk data   | 64 KiB          |
-| Maximum file size | 100 MB          |
+| Maximum file size | 100 GB          |
 
 Use separate maximums for different message types rather than one unlimited payload limit.
 
@@ -937,7 +937,7 @@ For V1:
 - 64 KB chunks.
 - One transfer stream per file.
 - Two simultaneous transfers per peer.
-- 100 MB maximum file size.
+- 100 GB maximum file size. The original limit was 100 MB, but the files this is really used for are often several GB, so it was raised along with adding resuming.
 - Temporary file storage until verification succeeds.
 
 After transfer, calculate the SHA-256 hash of the received file and compare it with the sender's declared hash.
@@ -951,6 +951,7 @@ Payloads, in addition to `FILE_OFFER` above:
 | Message | Payload |
 | ------- | ------- |
 | `FILE_ACCEPT` | `transferId` |
+| `FILE_RESUME` | `transferId`, `offset`: from the receiver, send the rest of the file starting at this byte. Chunk sequence numbers start again from 0 |
 | `FILE_REJECT` | `transferId`, `reason`: `declined`, `canceled`, `failed` or `busy`. Ends a transfer from either side at any stage |
 | `FILE_COMPLETE` | `transferId`: every byte was sent |
 | `FILE_ACK` | `transferId`, `verified`: whether the received file matched the offered hash |
@@ -960,15 +961,19 @@ Payloads, in addition to `FILE_OFFER` above:
 Rules:
 
 - **Nothing is written without acceptance.** An offer only creates a record. The temporary file is created when the user accepts, after checking that the disk would keep 50 MB free.
-- **Chunks.** Frames with no valid format, and any on a session that isn't paired or didn't agree the `file-transfer` capability, close the session, because the sender can't have meant them. A well-formed chunk for an unknown or unaccepted transfer, or from another device, gets `TRANSFER_REJECTED`, which counts towards the limit on refusals (§5.4). Chunks for a transfer that has ended are dropped silently, since some are always on their way. An out-of-order chunk, one past the offered size, or a third simultaneous file fails that transfer.
-- **Where files go.** Files stay in `files\incoming` until verified, then move to `files\downloads`. Roomie empties `files\incoming` when it starts. Verifying hashes the bytes read back from disk.
+- **Chunks.** Frames with no valid format, and any on a session that isn't paired or didn't agree the `file-transfer-2` capability, close the session, because the sender can't have meant them. A well-formed chunk for an unknown or unaccepted transfer, or from another device, gets `TRANSFER_REJECTED`, which counts towards the limit on refusals (§5.4). Chunks for a transfer that has ended are dropped silently, since some are always on their way. An out-of-order chunk, one past the offered size, or a third simultaneous file fails that transfer.
+- **Where files go.** Files stay in `files\incoming` until verified, then move to `files\downloads`. When it starts, Roomie removes anything in `files\incoming` that no open transfer needs. Verifying hashes the bytes read back from disk.
 - **Names (§10, rule 5).** An offered name is never a path. Separators and characters Windows forbids become `_`. Invisible formatting characters are removed, including the right-to-left override that can disguise `gpj.exe` as `exe.jpg`. Trailing dots and spaces are removed, because Windows would drop them and change the extension. Names Windows reserves, such as `CON`, get a `_` prefix. A name already taken gets a number, and nothing is ever overwritten.
 - **After arrival.** Roomie never opens a received file, and only offers to show it in its folder. The file gets the same `Zone.Identifier` mark a browser's download gets, so Windows warns before running it. Offers of files that can run programs carry a warning.
 - **Stopping.** A write in progress is never interrupted, because half a frame would end the session and everything on it. Canceling takes effect between chunks.
-- **Interruptions.** There is no resuming. A lost connection or restart fails a transfer on both sides, removes what had arrived, and offers **Send again**. An offer not yet answered survives both, and is sent again on each session, recognized by its ID. If everything was sent but the answer never arrived, the sender asks again with `FILE_COMPLETE` on the next session.
-- **Limits.** 100 MB per file, two files moving at once per device in each direction, and 20 unanswered offers from one device, after which further offers get `busy`.
+- **Interruptions.** A lost connection or a restart pauses a transfer on both sides, and it continues by itself when the devices next connect, without asking anyone again. The receiver leads, because only it knows what it has: on each session it sends `FILE_RESUME` for everything paused, and the sender continues from that byte. A sender only sends on an accept or resume from the current session, never from where it thinks it stopped. An offer not yet answered survives too, and is sent again on each session, recognized by its ID. A paused sender also repeats its offer, so if the transfer ended on the other side while the devices were apart, the answer says so. If everything was sent but the answer never arrived, the sender asks again with `FILE_COMPLETE`. If the receiver is still missing data, it ignores that question and its `FILE_RESUME` is the answer.
+- **What counts as received.** Every 64 MB, and whenever a transfer pauses, the receiver forces the file to disk and only then records how far it got. Continuing starts from that record and cuts off anything after it, because after a power cut the end of a file may not be what was written. So a crash costs at most 64 MB of sending again.
+- **Checks on continuing.** The whole-file SHA-256 is still the final check, read back from disk. The sender records the source file's last-written time when hashing it, and fails the transfer if the time or size differs when sending starts or continues, rather than sending a mixture that fails only at the very end. `FILE_RESUME` is only accepted from the device the file was offered to, and an offset past the end of the file fails the transfer.
+- **Ending a paused transfer.** Either side can cancel while paused. It removes the temporary file, and the other side learns on the next session. A paused transfer keeps its temporary file until it finishes or is canceled.
+- **Compatibility.** Resuming and the larger limit changed what a transfer means, so the capability is now `file-transfer-2`. A device on the first version doesn't share it: offers to it wait instead of being refused part-way, and chat still works.
+- **Limits.** 100 GB per file, two files moving at once per device in each direction, and 20 unanswered offers from one device, after which further offers get `busy`.
 
-**Not in V1.** Files go to one device at a time, not to a group. Sending reads the original file, so changing it while it waits or moves makes the transfer fail rather than sending something else. Received files stay where they are if the transfer's history is gone, and Roomie has no way to delete them.
+**Not in V1.** Files go to one device at a time, not to a group. Sending reads the original file, so changing it while it waits or moves makes the transfer fail rather than sending something else. There is one hash for the whole file, so a file that fails it at the end must be sent again from the start. TLS already protects the data on the way, so this would take damage on a disk. Received files stay where they are if the transfer's history is gone, and Roomie has no way to delete them.
 
 # 9. Protocol versioning and compatibility
 
@@ -989,7 +994,7 @@ During the initial authenticated session:
   "capabilities": [
     "text",
     "groups",
-    "file-transfer"
+    "file-transfer-2"
   ]
 }
 ```

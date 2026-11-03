@@ -21,10 +21,16 @@ using Roomie.Network.Messaging;
 
 namespace Roomie.Tests.Files;
 
+/// <summary>Moving large files is heavy on the disk, which would starve the timing-sensitive tests running beside it.</summary>
+[CollectionDefinition(nameof(HeavyFileTests), DisableParallelization = true)]
+public sealed class HeavyFileTests;
+
 /// <summary>Files between real nodes over loopback TLS, and from hand-driven peers that can lie.</summary>
+[Collection(nameof(HeavyFileTests))]
 public sealed class FileTransferServiceTests : IAsyncLifetime
 {
     private static readonly LanInterface Loopback = new("lo", "Loopback", new Ipv4Subnet(IPAddress.Loopback, 8));
+    private static readonly string[] FileCapabilities = [RmpCapabilities.Text, RmpCapabilities.FileTransfer];
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "roomie-tests", Guid.NewGuid().ToString("N"));
     private readonly List<IAsyncDisposable> _cleanup = [];
@@ -719,21 +725,308 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         Assert.Empty(Directory.GetFiles(bob.IncomingFolder));
     }
 
+    // ---- Interruptions: nothing starts over ----
+
     [Fact]
-    public async Task LostConnection_FailsTheTransferOnBothSides_AndRemovesWhatArrived()
+    public async Task LostConnection_PausesBothSides_AndTheFileStillArrivesIdentical()
     {
         var (alice, bob) = await PairedAsync();
-        var id = (await alice.Files.SendFileAsync(bob.Id, CreateFile("big.bin", 60 * 1024 * 1024).Path)).TransferId!.Value;
-        await WaitUntil(() => bob.Incoming(alice, id) is not null);
-        await bob.Files.AcceptAsync(alice.Id, id);
-        await WaitUntil(() => bob.Files.GetProgress(alice.Id, id) > 0);
+        var (path, content) = CreateFile("big.bin", 60 * 1024 * 1024);
+        var id = await StartMovingAsync(alice, bob, path);
 
         await alice.Connections.DisconnectAsync(bob.Id);
 
-        await WaitUntil(() => bob.Incoming(alice, id)!.State == FileTransferState.Failed);
-        await WaitUntil(() => alice.Outgoing(bob, id)!.State == FileTransferState.Failed);
+        await WaitUntil(() => bob.Files.IsPaused(bob.Incoming(alice, id)!) && alice.Files.IsPaused(alice.Outgoing(bob, id)!));
+        Assert.Equal(FileTransferState.Transferring, bob.Incoming(alice, id)!.State);
+        Assert.Equal(FileTransferState.Transferring, alice.Outgoing(bob, id)!.State);
+        Assert.Single(Directory.GetFiles(bob.IncomingFolder));
+        Assert.True(bob.Files.GetProgress(alice.Id, id) > 0);
+        Assert.Empty(Directory.GetFiles(bob.Downloads));
+
+        await alice.Connections.ConnectAsync(bob.Id);
+
+        await WaitUntil(() => alice.Outgoing(bob, id)!.State == FileTransferState.Completed);
+        Assert.Equal(content, File.ReadAllBytes(bob.Incoming(alice, id)!.LocalPath!));
+        Assert.Empty(Directory.GetFiles(bob.IncomingFolder));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Restarting_EitherSide_Continues_AndTheFileStillArrivesIdentical(bool restartReceiver)
+    {
+        var (alice, bob) = await PairedAsync();
+        var (path, content) = CreateFile("big.bin", 60 * 1024 * 1024);
+        var id = await StartMovingAsync(alice, bob, path);
+
+        if (restartReceiver)
+        {
+            bob = await RestartAsync(bob);
+            Assert.True(bob.Files.IsPaused(bob.Incoming(alice, id)!));
+        }
+        else
+        {
+            alice = await RestartAsync(alice);
+            Assert.True(alice.Files.IsPaused(alice.Outgoing(bob, id)!));
+        }
+
+        Assert.Single(Directory.GetFiles(bob.IncomingFolder));
+        await ConnectAsync(alice, bob);
+
+        await WaitUntil(() => alice.Outgoing(bob, id)!.State == FileTransferState.Completed);
+        Assert.Equal(content, File.ReadAllBytes(bob.Incoming(alice, id)!.LocalPath!));
+    }
+
+    [Fact]
+    public async Task Sender_ContinuesFromTheByteTheReceiverAsksFor()
+    {
+        var alice = await StartAsync("Alice");
+        var identity = TrustedIdentity(alice, "Raw");
+        var first = await RawPeer.ConnectAsync(identity, alice, FileCapabilities);
+        await WaitUntil(() => alice.Connections.TryGetSession(first.Id, out _));
+        var (path, content) = CreateFile("a.bin", 300_000);
+        var id = (await alice.Files.SendFileAsync(first.Id, path)).TransferId!.Value;
+        await first.ReadUntilAsync(RmpMessageTypes.FileOffer);
+        await first.SendAsync(RmpMessageTypes.FileAccept, SessionPayloads.ToElement(new FileAcceptPayload(id)));
+        await first.ReadFrameAsync();
+        await first.DisposeAsync();
+        await WaitUntil(() => !alice.Connections.TryGetSession(first.Id, out _));
+
+        await using var second = await RawPeer.ConnectAsync(identity, alice, FileCapabilities, ownsIdentity: true);
+        await WaitUntil(() => alice.Connections.TryGetSession(second.Id, out _));
+        await second.SendAsync(RmpMessageTypes.FileResume, SessionPayloads.ToElement(new FileResumePayload(id, 100_000)));
+
+        var received = new List<byte>();
+        var sequences = new List<uint>();
+
+        // A FILE_COMPLETE may come first, if the first session got everything out: that one only asks how it ended.
+        while (received.Count < content.Length - 100_000)
+        {
+            var frame = await second.ReadFrameAsync();
+            if (frame.Type == RmpFrameType.FileChunk && FileChunk.TryParse(frame.Payload, out var chunk) && chunk.TransferId == id)
+            {
+                sequences.Add(chunk.Sequence);
+                received.AddRange(chunk.Data.ToArray());
+            }
+        }
+
+        await second.ReadUntilAsync(RmpMessageTypes.FileComplete);
+
+        // Only what was missing, numbered from 0 again.
+        Assert.Equal(content[100_000..], received.ToArray());
+        Assert.Equal(Enumerable.Range(0, sequences.Count).Select(i => (uint)i), sequences);
+
+        await second.SendAsync(RmpMessageTypes.FileAck, SessionPayloads.ToElement(new FileAckPayload(id, true)));
+        await WaitUntil(() => alice.OutgoingOf(second.Id, id)!.State == FileTransferState.Completed);
+    }
+
+    [Fact]
+    public async Task Receiver_AsksOnlyForWhatItIsMissing_AndAcceptsTheRest()
+    {
+        var bob = await StartAsync("Bob");
+        var identity = TrustedIdentity(bob, "Raw");
+        var content = RandomBytes(300_000);
+        var first = await RawPeer.ConnectAsync(identity, bob, FileCapabilities);
+        await WaitUntil(() => bob.Connections.TryGetSession(first.Id, out _));
+        var id = await first.OfferAndAcceptAsync(bob, "a.bin", content);
+        await first.SendChunkAsync(id, 0, content[..FileChunk.MaxDataLength]);
+        await first.SendChunkAsync(id, 1, content[FileChunk.MaxDataLength..(2 * FileChunk.MaxDataLength)]);
+        await WaitUntil(() => bob.Files.GetProgress(first.Id, id) == 2 * FileChunk.MaxDataLength);
+        await first.DisposeAsync();
+        await WaitUntil(() => bob.Files.IsPaused(bob.IncomingOf(identity.Identity.DeviceId, id)!));
+
+        await using var second = await RawPeer.ConnectAsync(identity, bob, FileCapabilities, ownsIdentity: true);
+
+        var resume = SessionPayloads.TryDeserialize<FileResumePayload>((await second.ReadUntilAsync(RmpMessageTypes.FileResume)).Payload)!;
+        Assert.Equal(id, resume.TransferId);
+        Assert.Equal(2 * FileChunk.MaxDataLength, resume.Offset);
+
+        await second.SendChunksAsync(id, content, resume.Offset);
+        await second.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(id)));
+        var ack = await second.ReadUntilAsync(RmpMessageTypes.FileAck);
+
+        Assert.True(SessionPayloads.TryDeserialize<FileAckPayload>(ack.Payload)!.Verified);
+        Assert.Equal(content, File.ReadAllBytes(bob.IncomingOf(second.Id, id)!.LocalPath!));
+    }
+
+    [Fact]
+    public async Task AfterACrash_OnlyWhatWasRecordedCounts_AndTheRestIsSentAgain()
+    {
+        var bob = await StartAsync("Bob");
+        var identity = TrustedIdentity(bob, "Raw");
+        var content = RandomBytes(300_000);
+        var first = await RawPeer.ConnectAsync(identity, bob, FileCapabilities);
+        await WaitUntil(() => bob.Connections.TryGetSession(first.Id, out _));
+        var id = await first.OfferAndAcceptAsync(bob, "a.bin", content);
+        await first.SendChunkAsync(id, 0, content[..FileChunk.MaxDataLength]);
+        await first.SendChunkAsync(id, 1, content[FileChunk.MaxDataLength..(2 * FileChunk.MaxDataLength)]);
+        await WaitUntil(() => bob.Files.GetProgress(first.Id, id) == 2 * FileChunk.MaxDataLength);
+        await first.DisposeAsync();
+        await WaitUntil(() => bob.Files.IsPaused(bob.IncomingOf(identity.Identity.DeviceId, id)!));
+
+        // The second chunk may never have reached the disk, as a power cut would leave things.
+        bob.Store.SaveReceivedBytes(identity.Identity.DeviceId, id, FileChunk.MaxDataLength);
+        await File.WriteAllBytesAsync(Path.Combine(bob.IncomingFolder, "crash.part"), [1, 2, 3]);
+        bob = await RestartAsync(bob);
+        Assert.Equal([$"{id:N}.part"], Directory.GetFiles(bob.IncomingFolder).Select(Path.GetFileName));
+
+        await using var second = await RawPeer.ConnectAsync(identity, bob, FileCapabilities, ownsIdentity: true);
+
+        var resume = SessionPayloads.TryDeserialize<FileResumePayload>((await second.ReadUntilAsync(RmpMessageTypes.FileResume)).Payload)!;
+        Assert.Equal(FileChunk.MaxDataLength, resume.Offset);
+        await second.SendChunksAsync(id, content, resume.Offset);
+        await second.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(id)));
+        await second.ReadUntilAsync(RmpMessageTypes.FileAck);
+        Assert.Equal(content, File.ReadAllBytes(bob.IncomingOf(second.Id, id)!.LocalPath!));
+    }
+
+    [Fact]
+    public async Task ClosingDuringTheCheck_ChecksAgainWithoutSendingAnythingAgain()
+    {
+        var bob = await StartAsync("Bob");
+        var identity = TrustedIdentity(bob, "Raw");
+        var content = RandomBytes(1000);
+        var first = await RawPeer.ConnectAsync(identity, bob, FileCapabilities);
+        await WaitUntil(() => bob.Connections.TryGetSession(first.Id, out _));
+        var id = await first.OfferAndAcceptAsync(bob, "a.bin", content);
+        await first.SendChunkAsync(id, 0, content);
+        await WaitUntil(() => bob.Files.GetProgress(first.Id, id) == content.Length);
+        await first.DisposeAsync();
+        await WaitUntil(() => bob.Files.IsPaused(bob.IncomingOf(identity.Identity.DeviceId, id)!));
+
+        bob.Store.UpdateTransfer(identity.Identity.DeviceId, MessageDirection.Incoming, id, FileTransferState.Verifying, null, null);
+        bob = await RestartAsync(bob);
+        Assert.Equal(FileTransferState.Transferring, bob.IncomingOf(identity.Identity.DeviceId, id)!.State);
+
+        await using var second = await RawPeer.ConnectAsync(identity, bob, FileCapabilities, ownsIdentity: true);
+
+        var resume = SessionPayloads.TryDeserialize<FileResumePayload>((await second.ReadUntilAsync(RmpMessageTypes.FileResume)).Payload)!;
+        Assert.Equal(content.Length, resume.Offset);
+        await second.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(id)));
+        var ack = await second.ReadUntilAsync(RmpMessageTypes.FileAck);
+        Assert.True(SessionPayloads.TryDeserialize<FileAckPayload>(ack.Payload)!.Verified);
+    }
+
+    [Fact]
+    public async Task SenderWhoThinksItFinished_DoesntFailATransferThatIsStillMissingData()
+    {
+        var bob = await StartAsync("Bob");
+        var identity = TrustedIdentity(bob, "Raw");
+        var content = RandomBytes(1000);
+        var first = await RawPeer.ConnectAsync(identity, bob, FileCapabilities);
+        await WaitUntil(() => bob.Connections.TryGetSession(first.Id, out _));
+        var id = await first.OfferAndAcceptAsync(bob, "a.bin", content);
+        await first.SendChunkAsync(id, 0, content[..400]);
+        await WaitUntil(() => bob.Files.GetProgress(first.Id, id) == 400);
+        await first.DisposeAsync();
+        await WaitUntil(() => bob.Files.IsPaused(bob.IncomingOf(identity.Identity.DeviceId, id)!));
+
+        await using var second = await RawPeer.ConnectAsync(identity, bob, FileCapabilities, ownsIdentity: true);
+        await second.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(id)));
+
+        var resume = SessionPayloads.TryDeserialize<FileResumePayload>((await second.ReadUntilAsync(RmpMessageTypes.FileResume)).Payload)!;
+        await second.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(id)));
+        await second.RoundTripAsync();
+        Assert.Equal(FileTransferState.Transferring, bob.IncomingOf(second.Id, id)!.State);
+
+        await second.SendChunksAsync(id, content, resume.Offset);
+        await second.SendAsync(RmpMessageTypes.FileComplete, SessionPayloads.ToElement(new FileCompletePayload(id)));
+        var ack = await second.ReadUntilAsync(RmpMessageTypes.FileAck);
+        Assert.True(SessionPayloads.TryDeserialize<FileAckPayload>(ack.Payload)!.Verified);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CancelingWhileApart_RemovesWhatArrived_AndTheOtherSideLearnsOnReconnecting(bool receiverCancels)
+    {
+        var (alice, bob) = await PairedAsync();
+        var id = await StartMovingAsync(alice, bob, CreateFile("big.bin", 60 * 1024 * 1024).Path);
+        await alice.Connections.DisconnectAsync(bob.Id);
+        await WaitUntil(() => bob.Files.IsPaused(bob.Incoming(alice, id)!) && alice.Files.IsPaused(alice.Outgoing(bob, id)!));
+
+        if (receiverCancels)
+        {
+            Assert.Null((await bob.Files.CancelAsync(alice.Id, MessageDirection.Incoming, id)).Error);
+            Assert.Empty(Directory.GetFiles(bob.IncomingFolder));
+        }
+        else
+        {
+            Assert.Null((await alice.Files.CancelAsync(bob.Id, MessageDirection.Outgoing, id)).Error);
+        }
+
+        await alice.Connections.ConnectAsync(bob.Id);
+
+        await WaitUntil(() => alice.Outgoing(bob, id)!.State == FileTransferState.Canceled && bob.Incoming(alice, id)!.State == FileTransferState.Canceled);
         await WaitUntil(() => Directory.GetFiles(bob.IncomingFolder).Length == 0);
         Assert.Empty(Directory.GetFiles(bob.Downloads));
+    }
+
+    [Fact]
+    public async Task SourceFileChangedWhileApart_FailsWithAnExplanation_InsteadOfSendingAMixture()
+    {
+        var (alice, bob) = await PairedAsync();
+        var (path, content) = CreateFile("big.bin", 60 * 1024 * 1024);
+        var id = await StartMovingAsync(alice, bob, path);
+        await alice.Connections.DisconnectAsync(bob.Id);
+        await WaitUntil(() => alice.Files.IsPaused(alice.Outgoing(bob, id)!) && bob.Files.IsPaused(bob.Incoming(alice, id)!));
+
+        // The same size, so only the time gives it away.
+        content[^1] ^= 0xFF;
+        await File.WriteAllBytesAsync(path, content);
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(1));
+
+        await alice.Connections.ConnectAsync(bob.Id);
+
+        await WaitUntil(() => alice.Outgoing(bob, id)!.State == FileTransferState.Failed && bob.Incoming(alice, id)!.State == FileTransferState.Failed);
+        Assert.Contains("changed", alice.Outgoing(bob, id)!.Failure, StringComparison.Ordinal);
+        await WaitUntil(() => Directory.GetFiles(bob.IncomingFolder).Length == 0);
+        Assert.Empty(Directory.GetFiles(bob.Downloads));
+    }
+
+    [Fact]
+    public async Task ResumePastTheEndOfTheFile_FailsTheTransfer()
+    {
+        var alice = await StartAsync("Alice");
+        await using var raw = await RawPeerAsync(alice, "Raw");
+        var id = (await alice.Files.SendFileAsync(raw.Id, CreateFile("a.bin", 100).Path)).TransferId!.Value;
+        await raw.ReadUntilAsync(RmpMessageTypes.FileOffer);
+
+        await raw.SendAsync(RmpMessageTypes.FileResume, SessionPayloads.ToElement(new FileResumePayload(id, 101)));
+
+        await raw.ReadUntilAsync(RmpMessageTypes.FileReject);
+        Assert.Equal(FileTransferState.Failed, alice.OutgoingOf(raw.Id, id)!.State);
+    }
+
+    [Fact]
+    public async Task ResumeWithANegativeOffset_IsMalformed()
+    {
+        var alice = await StartAsync("Alice");
+        await using var raw = await RawPeerAsync(alice, "Raw");
+        var id = (await alice.Files.SendFileAsync(raw.Id, CreateFile("a.bin", 100).Path)).TransferId!.Value;
+        await raw.ReadUntilAsync(RmpMessageTypes.FileOffer);
+
+        await raw.SendAsync(RmpMessageTypes.FileResume, SessionPayloads.ToElement(new FileResumePayload(id, -1)));
+
+        Assert.Equal(RmpErrorCodes.InvalidFrame, (await raw.ReadErrorAsync()).Code);
+        Assert.Equal(FileTransferState.Offered, alice.OutgoingOf(raw.Id, id)!.State);
+    }
+
+    [Fact]
+    public async Task OnlyTheDeviceOfferedAFile_CanResumeIt()
+    {
+        var alice = await StartAsync("Alice");
+        await using var intended = await RawPeerAsync(alice, "Intended");
+        await using var other = await RawPeerAsync(alice, "Other");
+        var id = (await alice.Files.SendFileAsync(intended.Id, CreateFile("secret.txt", 100).Path)).TransferId!.Value;
+        await intended.ReadUntilAsync(RmpMessageTypes.FileOffer);
+
+        await other.SendAsync(RmpMessageTypes.FileResume, SessionPayloads.ToElement(new FileResumePayload(id, 0)));
+
+        await other.ReadUntilAsync(RmpMessageTypes.FileReject);
+        Assert.Equal(FileTransferState.Offered, alice.OutgoingOf(intended.Id, id)!.State);
+        var seen = await other.ReadAllUntilHeartbeatAckAsync();
+        Assert.DoesNotContain(seen, f => f.Type == RmpFrameType.FileChunk);
     }
 
     [Fact]
@@ -755,15 +1048,13 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
     [Fact]
     public async Task SendingAFileThatIsTooLargeOrMissing_ExplainsWhy()
     {
-        var (alice, bob) = await PairedAsync();
+        var alice = await StartAsync("Alice", new FileOptionsOverride(MaxFile: 1000));
+        var bob = await StartAsync("Bob");
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
 
-        var tooLarge = Path.Combine(_root, "huge.bin");
-        using (var stream = File.Create(tooLarge))
-        {
-            stream.SetLength(RmpContentLimits.MaxFileSizeBytes + 1);
-        }
-
-        Assert.Contains("too large", (await alice.Files.SendFileAsync(bob.Id, tooLarge)).Error, StringComparison.Ordinal);
+        Assert.Contains("too large", (await alice.Files.SendFileAsync(bob.Id, CreateFile("huge.bin", 1001).Path)).Error, StringComparison.Ordinal);
+        Assert.Null((await alice.Files.SendFileAsync(bob.Id, CreateFile("fits.bin", 1000).Path)).Error);
         Assert.NotNull((await alice.Files.SendFileAsync(bob.Id, Path.Combine(_root, "missing.bin"))).Error);
         Assert.NotNull((await alice.Files.SendFileAsync(Guid.NewGuid(), CreateFile("a.txt", 1).Path)).Error);
     }
@@ -819,29 +1110,6 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RestartDuringATransfer_MarksItFailed_AndEmptiesTheIncomingFolder()
-    {
-        var bob = await StartAsync("Bob");
-        var rawIdentity = NewIdentity("Raw");
-        bob.Trust.Trust(new TrustedPeer(rawIdentity.Identity.DeviceId, "Raw", rawIdentity.Identity.CertificateFingerprint, DateTimeOffset.UtcNow));
-        var raw = await RawPeer.ConnectAsync(rawIdentity, bob, [RmpCapabilities.Text, RmpCapabilities.FileTransfer]);
-        await WaitUntil(() => bob.Connections.TryGetSession(raw.Id, out _));
-        var content = RandomBytes(100);
-        var id = await raw.OfferAndAcceptAsync(bob, "a.txt", content);
-        await raw.SendChunkAsync(id, 0, content.AsSpan(0, 50).ToArray());
-        await WaitUntil(() => bob.IncomingOf(raw.Id, id)!.State == FileTransferState.Transferring);
-
-        // A leftover as a crash would leave one.
-        await File.WriteAllBytesAsync(Path.Combine(bob.IncomingFolder, "crash.part"), [1, 2, 3]);
-        bob = await RestartAsync(bob);
-
-        Assert.Equal(FileTransferState.Failed, bob.IncomingOf(raw.Id, id)!.State);
-        Assert.Empty(Directory.GetFiles(bob.IncomingFolder));
-        await raw.DisposeAsync();
-        rawIdentity.Dispose();
-    }
-
-    [Fact]
     public async Task SenderThatRestartsAfterSendingEverything_FindsOutHowItEnded()
     {
         var (alice, bob) = await PairedAsync();
@@ -873,6 +1141,24 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         var content = RandomBytes(size);
         File.WriteAllBytes(path, content);
         return (path, content);
+    }
+
+    /// <summary>Returns once data is moving and a good part of the file is still to come.</summary>
+    private static async Task<Guid> StartMovingAsync(Node sender, Node receiver, string path)
+    {
+        var id = (await sender.Files.SendFileAsync(receiver.Id, path)).TransferId!.Value;
+        await WaitUntil(() => receiver.Incoming(sender, id) is not null);
+        Assert.Null((await receiver.Files.AcceptAsync(sender.Id, id)).Error);
+        await WaitUntil(() => receiver.Files.GetProgress(sender.Id, id) > 0);
+        return id;
+    }
+
+    /// <summary>An identity that stays trusted across several raw connections.</summary>
+    private DeviceIdentityStore TrustedIdentity(Node target, string name)
+    {
+        var identity = NewIdentity(name);
+        target.Trust.Trust(new TrustedPeer(identity.Identity.DeviceId, name, identity.Identity.CertificateFingerprint, DateTimeOffset.UtcNow));
+        return identity;
     }
 
     private static async Task<string> TransferAsync(Node sender, Node receiver, string path)
@@ -928,7 +1214,7 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         return peer;
     }
 
-    private sealed record FileOptionsOverride(int? MaxOpenOffers = null, long? MinFree = null);
+    private sealed record FileOptionsOverride(int? MaxOpenOffers = null, long? MinFree = null, long? MaxFile = null);
 
     private Task<Node> StartAsync(string username, FileOptionsOverride? overrides = null)
     {
@@ -968,6 +1254,7 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
             IncomingDirectory = defaults.IncomingDirectory,
             MaxOpenOffersPerDevice = overrides?.MaxOpenOffers ?? defaults.MaxOpenOffersPerDevice,
             MinFreeBytesAfterAccept = overrides?.MinFree ?? 0,
+            MaxFileSizeBytes = overrides?.MaxFile ?? defaults.MaxFileSizeBytes,
         };
         Directory.CreateDirectory(options.DownloadsDirectory);
         var files = new FileTransferService(connections, store, trust, options, TimeProvider.System, NullLogger<FileTransferService>.Instance);
@@ -1101,6 +1388,16 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         }
 
         public Task SendChunkAsync(Guid id, uint sequence, byte[] data) => SendFrameAsync(FileChunk.Encode(id, sequence, data));
+
+        /// <summary>Everything from an offset on, numbered from 0 as after a FILE_RESUME.</summary>
+        public async Task SendChunksAsync(Guid id, byte[] content, long offset)
+        {
+            uint sequence = 0;
+            for (var at = (int)offset; at < content.Length; at += FileChunk.MaxDataLength)
+            {
+                await SendChunkAsync(id, sequence++, content[at..Math.Min(at + FileChunk.MaxDataLength, content.Length)]);
+            }
+        }
 
         public async Task SendFrameAsync(byte[] frame)
         {

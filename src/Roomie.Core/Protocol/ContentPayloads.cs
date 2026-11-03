@@ -9,7 +9,7 @@ public static class RmpContentLimits
 {
     public const int MaxTextBodyBytes = 16 * 1024;
     public const int MaxFileMetadataBytes = 16 * 1024;
-    public const long MaxFileSizeBytes = 100L * 1024 * 1024;
+    public const long MaxFileSizeBytes = 100L * 1024 * 1024 * 1024;
     public const int MaxIdentifierLength = 64;
     public const int MaxFilenameLength = 255;
     public const int MaxContentTypeLength = 127;

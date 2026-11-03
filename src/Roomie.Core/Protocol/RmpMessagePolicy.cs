@@ -10,7 +10,10 @@ public static class RmpCapabilities
 {
     public const string Text = "text";
     public const string Groups = "groups";
-    public const string FileTransfer = "file-transfer";
+
+    // The "-2" is because resuming and larger files changed what a transfer means. A device on the first version
+    // can't take part, so its offers wait instead of being refused part-way (architecture.md §8).
+    public const string FileTransfer = "file-transfer-2";
 }
 
 /// <summary>What was agreed for one session: the intersection of what both sides advertised in <c>HELLO</c>.</summary>
@@ -92,6 +95,7 @@ public static class RmpMessagePolicy
 
         new(RmpMessageTypes.FileOffer, Metadata, RequiredCapability: RmpCapabilities.FileTransfer, Validate: ContentPayloads.CheckFileOffer),
         new(RmpMessageTypes.FileAccept, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckAccept),
+        new(RmpMessageTypes.FileResume, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckResume),
         new(RmpMessageTypes.FileReject, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckReject),
         new(RmpMessageTypes.FileChunk, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: NeverAControlMessage),
         new(RmpMessageTypes.FileComplete, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckComplete),
