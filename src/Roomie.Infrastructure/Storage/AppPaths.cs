@@ -14,6 +14,7 @@ public sealed class AppPaths
         Database = Path.Combine(Root, "database");
         Downloads = Path.Combine(Root, "files", "downloads");
         Attachments = Path.Combine(Root, "files", "attachments");
+        Incoming = Path.Combine(Root, "files", "incoming");
         Logs = Path.Combine(Root, "logs");
         Config = Path.Combine(Root, "config");
         Identity = Path.Combine(Root, "identity");
@@ -23,6 +24,9 @@ public sealed class AppPaths
     public string Database { get; }
     public string Downloads { get; }
     public string Attachments { get; }
+
+    /// <summary>Files still arriving. Nothing here has been verified, and Roomie empties it when it starts.</summary>
+    public string Incoming { get; }
     public string Logs { get; }
     public string Config { get; }
     public string Identity { get; }
@@ -42,7 +46,7 @@ public sealed class AppPaths
 
     public void EnsureCreated()
     {
-        foreach (var directory in new[] { Database, Downloads, Attachments, Logs, Config, Identity })
+        foreach (var directory in new[] { Database, Downloads, Attachments, Incoming, Logs, Config, Identity })
         {
             Directory.CreateDirectory(directory);
         }

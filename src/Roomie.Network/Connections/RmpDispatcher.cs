@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Roomie.Core.Files;
 using Roomie.Core.Protocol;
 
 namespace Roomie.Network.Connections;
@@ -9,6 +10,9 @@ namespace Roomie.Network.Connections;
 /// may do brief work such as a database write, but must never wait for a user.
 /// </summary>
 public delegate ValueTask RmpMessageHandler(PeerSession session, RmpEnvelope message, CancellationToken cancellationToken);
+
+/// <summary>Handles one binary chunk, on the same terms as <see cref="RmpMessageHandler"/>.</summary>
+public delegate ValueTask RmpChunkHandler(PeerSession session, FileChunk chunk, CancellationToken cancellationToken);
 
 /// <summary>
 /// Routes validated messages to the service that owns their type (architecture.md §5.1, step 6). Each type
@@ -22,6 +26,52 @@ public sealed partial class RmpDispatcher(ILogger logger)
 
     private readonly Lock _gate = new();
     private readonly Dictionary<string, RmpMessageHandler> _handlers = new(StringComparer.Ordinal);
+    private RmpChunkHandler? _chunkHandler;
+
+    /// <summary>Makes <paramref name="handler"/> the owner of binary chunks.</summary>
+    public void RegisterChunks(RmpChunkHandler handler)
+    {
+        lock (_gate)
+        {
+            _chunkHandler = handler;
+        }
+    }
+
+    /// <returns>Why the chunk couldn't be handled, or null if it was.</returns>
+    internal async ValueTask<RmpRejection?> DispatchChunkAsync(PeerSession session, FileChunk chunk, CancellationToken cancellationToken)
+    {
+        RmpChunkHandler? handler;
+        lock (_gate)
+        {
+            handler = _chunkHandler;
+        }
+
+        if (handler is null)
+        {
+            return new RmpRejection(RmpErrorCodes.TransferRejected, "This device can't receive files right now.");
+        }
+
+#pragma warning disable CA1031 // As in DispatchAsync: nothing a handler throws may end the read loop.
+        try
+        {
+            await handler(session, chunk, cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (RmpProtocolException ex)
+        {
+            return new RmpRejection(ex.Code, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            LogHandlerFailed(logger, "file chunk", session.RemoteDeviceId, ex);
+            return new RmpRejection(RmpErrorCodes.InternalError, "The chunk couldn't be processed.");
+        }
+#pragma warning restore CA1031
+    }
 
     /// <summary>Makes <paramref name="handler"/> the owner of these message types until the result is disposed.</summary>
     /// <exception cref="ArgumentException">A type is unknown, belongs to the session layer, or already has an owner.</exception>

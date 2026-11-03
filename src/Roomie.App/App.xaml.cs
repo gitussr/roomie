@@ -11,6 +11,7 @@ using Roomie.App.ViewModels;
 using Roomie.App.Views;
 using Roomie.Core.Configuration;
 using Roomie.Core.Discovery;
+using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
@@ -22,6 +23,7 @@ using Roomie.Infrastructure.Storage;
 using Roomie.Infrastructure.Trust;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Files;
 using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
@@ -91,7 +93,7 @@ public partial class App : Application
                 services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<IDeviceSigner>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<ITrustStore>(trust);
-                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups] });
+                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.FileTransfer] });
                 services.AddSingleton<ConnectionManager>();
                 services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
 
@@ -105,6 +107,11 @@ public partial class App : Application
                 services.AddSingleton(new MessagingOptions());
                 services.AddSingleton<MessagingService>();
                 services.AddHostedService(sp => sp.GetRequiredService<MessagingService>());
+
+                services.AddSingleton<IFileTransferStore>(sp => sp.GetRequiredService<SqliteMessageStore>());
+                services.AddSingleton(new FileTransferOptions { DownloadsDirectory = paths.Downloads, IncomingDirectory = paths.Incoming });
+                services.AddSingleton<FileTransferService>();
+                services.AddHostedService(sp => sp.GetRequiredService<FileTransferService>());
 
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<MainWindow>();
@@ -132,6 +139,7 @@ public partial class App : Application
         // Services claim their message types when created, so create them before sessions can open.
         _host.Services.GetRequiredService<PairingService>();
         _host.Services.GetRequiredService<MessagingService>();
+        _host.Services.GetRequiredService<FileTransferService>();
 
         await _host.StartAsync();
 

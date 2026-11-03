@@ -1,11 +1,16 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Win32;
+using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
 using Roomie.Core.Trust;
+using Roomie.Network.Files;
 using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 
@@ -21,10 +26,25 @@ public sealed record GroupMemberItem(Guid DeviceId, string Name, string Status, 
 public sealed record GroupInviteCandidate(Guid DeviceId, string Name);
 
 /// <summary>The open conversation, with one device or a group. The whole list is rebuilt from the store on every change.</summary>
-public sealed partial class ChatViewModel(MessagingService messaging, GroupService groups, IMessageStore store, ITrustStore trust, ILocalIdentityProvider identity) : ObservableObject
+public sealed partial class ChatViewModel(MessagingService messaging, GroupService groups, FileTransferService files, IMessageStore store, ITrustStore trust, ILocalIdentityProvider identity) : ObservableObject
 {
     /// <summary>The panel creates a control per message, so a long history can't all be shown until it can page.</summary>
     public const int MaxShownMessages = 500;
+
+    private const int MaxShownFiles = 50;
+
+    /// <summary>Files with this device, newest first.</summary>
+    public ObservableCollection<FileTransferItem> Files { get; } = [];
+
+    [ObservableProperty]
+    private bool _hasFiles;
+
+    [ObservableProperty]
+    private string _filesTitle = "Files";
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SendFileCommand))]
+    private bool _isPreparingFile;
 
     public ObservableCollection<ChatBubble> Messages { get; } = [];
 
@@ -46,7 +66,12 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     private bool _isOpen;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsDirect))]
+    [NotifyCanExecuteChangedFor(nameof(SendFileCommand))]
     private bool _isGroup;
+
+    /// <summary>Files go to one device at a time.</summary>
+    public bool IsDirect => !IsGroup;
 
     [ObservableProperty]
     private string _membersTitle = string.Empty;
@@ -72,6 +97,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SendCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SendFileCommand))]
     private bool _canCompose;
 
     public void Open(Guid peerId)
@@ -126,6 +152,126 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         Problem = CanCompose ? messaging.GetDeliveryProblem(peerId) : "This device isn't paired, so you can't send it messages.";
 
         ReadMessages(() => store.GetConversation(peerId, MaxShownMessages + 1), ToBubble);
+        RefreshFiles();
+    }
+
+    /// <summary>Called for each stage and a few times a second while data moves, so it does nothing else.</summary>
+    public void RefreshFiles()
+    {
+        if (PeerId is not { } peerId)
+        {
+            return;
+        }
+
+        IReadOnlyList<StoredTransfer> transfers;
+        try
+        {
+            transfers = files.GetTransfers(peerId, MaxShownFiles);
+        }
+        catch (MessageStoreException)
+        {
+            return;
+        }
+
+        for (var i = Files.Count - 1; i >= 0; i--)
+        {
+            if (transfers.All(t => t.TransferId != Files[i].TransferId))
+            {
+                Files.RemoveAt(i);
+            }
+        }
+
+        for (var i = 0; i < transfers.Count; i++)
+        {
+            var transfer = transfers[i];
+            var item = Files.FirstOrDefault(f => f.TransferId == transfer.TransferId && f.Direction == transfer.Direction);
+            if (item is null)
+            {
+                item = new FileTransferItem(transfer.TransferId, peerId, transfer.Direction, transfer.Filename);
+                Files.Insert(Math.Min(i, Files.Count), item);
+            }
+
+            item.Update(transfer, files.GetProgress(peerId, transfer.TransferId));
+        }
+
+        HasFiles = Files.Count > 0;
+        var waiting = Files.Count(f => f.CanAnswer);
+        FilesTitle = waiting > 0 ? $"Files ({waiting} waiting for your answer)" : "Files";
+    }
+
+    private bool CanSendFile() => CanCompose && !IsGroup && !IsPreparingFile;
+
+    [RelayCommand(CanExecute = nameof(CanSendFile))]
+    private async Task SendFileAsync()
+    {
+        if (PeerId is not { } peerId)
+        {
+            return;
+        }
+
+        var dialog = new OpenFileDialog { Title = "Choose a file to send (100 MB at most)", CheckFileExists = true };
+        if (dialog.ShowDialog() == true)
+        {
+            await StartSendingAsync(peerId, dialog.FileName);
+        }
+    }
+
+    private async Task StartSendingAsync(Guid peerId, string path)
+    {
+        IsPreparingFile = true;
+        try
+        {
+            SendError = (await files.SendFileAsync(peerId, path)).Error;
+            RefreshFiles();
+        }
+        finally
+        {
+            IsPreparingFile = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task AcceptFileAsync(FileTransferItem item)
+    {
+        SendError = (await files.AcceptAsync(item.PeerId, item.TransferId)).Error;
+        RefreshFiles();
+    }
+
+    [RelayCommand]
+    private async Task DeclineFileAsync(FileTransferItem item)
+    {
+        SendError = (await files.DeclineAsync(item.PeerId, item.TransferId)).Error;
+        RefreshFiles();
+    }
+
+    [RelayCommand]
+    private async Task CancelFileAsync(FileTransferItem item)
+    {
+        SendError = (await files.CancelAsync(item.PeerId, item.Direction, item.TransferId)).Error;
+        RefreshFiles();
+    }
+
+    [RelayCommand]
+    private async Task SendFileAgainAsync(FileTransferItem item)
+    {
+        if (item.LocalPath is { } path)
+        {
+            await StartSendingAsync(item.PeerId, path);
+        }
+    }
+
+    /// <summary>Shows the file in its folder. Roomie never opens a received file itself.</summary>
+    [RelayCommand]
+    private void ShowFile(FileTransferItem item)
+    {
+        if (item.LocalPath is not { } path || !File.Exists(path))
+        {
+            SendError = "That file isn't there any more. It may have been moved or deleted.";
+            return;
+        }
+
+        // A received name can't contain a quote: SafeFilename replaces it.
+        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = false })?.Dispose();
     }
 
     private void UpdateGroup(string groupId)
@@ -258,6 +404,8 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         Messages.Clear();
         Members.Clear();
         InviteCandidates.Clear();
+        Files.Clear();
+        HasFiles = false;
     }
 
     private void ReadMessages(Func<IReadOnlyList<StoredMessage>> read, Func<StoredMessage, ChatBubble> toBubble)

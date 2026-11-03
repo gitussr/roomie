@@ -17,6 +17,12 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>Assets\roomie.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\roomie.ico" />
+    <Resource Include="Assets\roomie.png" />
+  </ItemGroup>
 
 </Project>

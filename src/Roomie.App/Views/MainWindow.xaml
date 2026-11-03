@@ -7,6 +7,7 @@
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
         Title="{Binding WindowTitle}"
+        Icon="/Assets/roomie.ico"
         Height="600" Width="960" MinHeight="400" MinWidth="640"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
@@ -325,6 +326,86 @@
                     </DockPanel>
                 </Border>
 
+                <!-- Files with this device. Open by default, because an offer needs an answer. -->
+                <Expander DockPanel.Dock="Top" Margin="16,6" Header="{Binding Chat.FilesTitle}" IsExpanded="True"
+                          Visibility="{Binding Chat.HasFiles, Converter={StaticResource BoolToVisibility}}">
+                    <ScrollViewer MaxHeight="200" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl ItemsSource="{Binding Chat.Files}" Focusable="False" AutomationProperties.Name="Files">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:FileTransferItem}">
+                                    <Border Margin="0,4,0,0" Padding="8,6" Background="#F7F7F7" CornerRadius="4">
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" />
+                                            <TextBlock Text="{Binding Status}" FontSize="11" TextWrapping="Wrap">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#606060" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsProblem}" Value="True">
+                                                                <Setter Property="Foreground" Value="Firebrick" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <TextBlock Text="{Binding Warning}" Foreground="Firebrick" FontSize="11" TextWrapping="Wrap">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Style.Triggers>
+                                                            <Trigger Property="Text" Value="{x:Null}">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                            </Trigger>
+                                                            <Trigger Property="Text" Value="">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                            </Trigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <ProgressBar Margin="0,4,0,0" Height="6" Maximum="100" Value="{Binding Percent, Mode=OneWay}"
+                                                         Visibility="{Binding IsMoving, Converter={StaticResource BoolToVisibility}}"
+                                                         AutomationProperties.Name="{Binding Name, StringFormat='Progress of {0}'}" />
+                                            <WrapPanel Margin="0,4,0,0">
+                                                <WrapPanel.Resources>
+                                                    <Style TargetType="Button">
+                                                        <Setter Property="Margin" Value="0,0,6,0" />
+                                                        <Setter Property="Padding" Value="10,1" />
+                                                    </Style>
+                                                </WrapPanel.Resources>
+                                                <Button Content="Accept" FontWeight="SemiBold"
+                                                        Command="{Binding DataContext.Chat.AcceptFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}"
+                                                        Visibility="{Binding CanAnswer, Converter={StaticResource BoolToVisibility}}"
+                                                        AutomationProperties.Name="{Binding Name, StringFormat='Accept {0}'}" />
+                                                <Button Content="Decline"
+                                                        Command="{Binding DataContext.Chat.DeclineFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}"
+                                                        Visibility="{Binding CanAnswer, Converter={StaticResource BoolToVisibility}}"
+                                                        AutomationProperties.Name="{Binding Name, StringFormat='Decline {0}'}" />
+                                                <Button Content="Cancel"
+                                                        Command="{Binding DataContext.Chat.CancelFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}"
+                                                        Visibility="{Binding CanCancel, Converter={StaticResource BoolToVisibility}}"
+                                                        AutomationProperties.Name="{Binding Name, StringFormat='Cancel {0}'}" />
+                                                <Button Content="Show in folder"
+                                                        Command="{Binding DataContext.Chat.ShowFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}"
+                                                        Visibility="{Binding CanShow, Converter={StaticResource BoolToVisibility}}"
+                                                        AutomationProperties.Name="{Binding Name, StringFormat='Show {0} in folder'}" />
+                                                <Button Content="Send again"
+                                                        Command="{Binding DataContext.Chat.SendFileAgainCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}"
+                                                        Visibility="{Binding CanSendAgain, Converter={StaticResource BoolToVisibility}}"
+                                                        AutomationProperties.Name="{Binding Name, StringFormat='Send {0} again'}" />
+                                            </WrapPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Expander>
+
                 <!-- Who is in the open group, and for its owner, who can be invited. -->
                 <Expander DockPanel.Dock="Top" Margin="16,6" Header="{Binding Chat.MembersTitle}"
                           Visibility="{Binding Chat.IsGroup, Converter={StaticResource BoolToVisibility}}">
@@ -400,6 +481,9 @@
                         <DockPanel>
                             <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="16,4" VerticalAlignment="Bottom"
                                     Content="Send" FontWeight="SemiBold" Command="{Binding Chat.SendCommand}" />
+                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="10,4" VerticalAlignment="Bottom"
+                                    Content="Send file…" Command="{Binding Chat.SendFileCommand}"
+                                    Visibility="{Binding Chat.IsDirect, Converter={StaticResource BoolToVisibility}}" />
                             <TextBox x:Name="Composer" Text="{Binding Chat.Draft, UpdateSourceTrigger=PropertyChanged}"
                                      IsEnabled="{Binding Chat.CanCompose}" AcceptsReturn="True" TextWrapping="Wrap"
                                      MaxHeight="120" MinHeight="28" Padding="4" VerticalContentAlignment="Center"
@@ -468,6 +552,8 @@
 
             <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center"
                         Visibility="{Binding IsWelcomeVisible, Converter={StaticResource BoolToVisibility}}">
+                <Image Source="/Assets/roomie.png" Width="96" Height="96" Margin="0,0,0,12"
+                       HorizontalAlignment="Center" AutomationProperties.Name="Roomie logo" />
                 <TextBlock Text="{Binding Title}" FontSize="28" FontWeight="SemiBold"
                            HorizontalAlignment="Center" />
                 <TextBlock Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="Gray" TextAlignment="Center"

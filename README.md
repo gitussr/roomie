@@ -13,11 +13,24 @@ Roomie is a peer-to-peer LAN messenger for Windows. It needs no server, internet
 - **Phase 6 (messaging), done.** Choose **Chat** next to a paired device to send it text. Each message shows *Waiting to send*, *Sent*, *Delivered* (the other PC stored it) or *Read* (someone there had the conversation open). A message to an offline device waits and goes out when it reconnects. Messages that may have been lost are sent again, and duplicates are never stored twice. The rules are in architecture.md §6.
 - **Phase 7 (saved messages), done.** Messages are saved in `database\messenger.db` (SQLite), so history, unread counts, messages still waiting and read receipts still owed all survive closing Roomie, a crash or a power cut. Every message is on disk before it is sent or acknowledged. A damaged database, or one from a newer Roomie, is refused with an explanation and never overwritten. The database isn't encrypted: it's protected by your Windows account, like other files in your profile. Forgetting a device keeps its messages. The rules are in architecture.md §6.
 - **Phase 8 (groups), done.** Type a name under **Groups** and choose **New group**, then open **Members** to invite paired devices. An invited device joins only if its user chooses **Join**. Each member's copy of a message is delivered and tracked separately, so one offline member holds nobody else up. Only the owner can add or remove members, and every change is signed with the owner's device key, so any member can pass it on but none can forge it. Being in a group creates no trust: a member you haven't paired with gets your messages only once you pair. A removed device keeps its history but can't send. There is no leaving a group or changing its owner in this version. The rules are in architecture.md §7.
-- **Next: Phase 9,** file transfer.
+- **Phase 9 (file transfer), done.** Open **Chat** with a paired device and choose **Send file…**, up to 100 MB. The other side chooses **Accept** or **Decline**, and nothing is saved before that. Files arrive in `files\downloads` under Roomie's data folder, only after their SHA-256 matches, and never overwrite anything. Roomie never opens a received file: it offers **Show in folder**, and marks the file so that Windows warns before running it. An interrupted transfer isn't resumed, so it fails on both sides with a **Send again** button. Files go to one device at a time, not to a group. The rules are in architecture.md §8.
+- **Next: Phase 10,** the finished WPF interface and native Windows integration.
+
+### Testing file transfer on two PCs
+
+Run the same 0.9.0 build on both PCs. Your paired devices, messages and groups carry over, and the database is upgraded on first run, after which older versions refuse it.
+
+1. On PC A, open **Chat** with PC B and choose **Send file…**. B should come to the front, with the file under **Files** and a count on **Chat**. Nothing should be in B's `files\downloads` yet.
+2. **Decline** on B: A should show *They declined*, with **Send again**. Send again and **Accept**: both should end on *verified*. **Show in folder** on B should open the folder with the file selected. Check the file opens and is intact.
+3. Send a file of about 100 MB, and chat in both directions while it moves. The progress bar should move, and messages should still arrive quickly. Try a file over 100 MB: it should say it's too large.
+4. Send a large file and choose **Cancel** on the receiver part-way, then on the sender. Both should say *Canceled*, nothing should be in `files\downloads`, and chat should keep working without reconnecting.
+5. Send a large file and pull the network cable part-way. Both should show a failure within about 15 seconds. Reconnect, and **Send again** should work.
+6. With B closed, send a file from A: it should say it will be offered when the device is connected. Open B: the offer should appear.
+7. Send a `.exe` or `.bat`. B should show a warning before accepting. After accepting, running it from the folder should bring up the Windows warning about files from elsewhere.
 
 ### Testing groups on two PCs
 
-Run the same 0.8.0 build on both PCs. Your paired devices and saved messages carry over, and the database is upgraded on first run, after which older versions refuse it.
+Run the same build on both PCs. Your paired devices and saved messages carry over.
 
 1. On PC A, type a name under **Groups**, choose **New group**, open **Members** and choose **Invite** next to PC B.
 2. PC B should come to the front and show the invitation. Choose **Decline**: nothing should change on A, and B shouldn't be asked again until A invites again. Invite again and choose **Join** on B. Both should show two members.

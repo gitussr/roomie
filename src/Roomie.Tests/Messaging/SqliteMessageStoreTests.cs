@@ -313,9 +313,9 @@ public sealed class SqliteMessageStoreTests : IDisposable
         store.TryAddIncoming(Incoming());
         store.Dispose();
 
-        Assert.Equal(2, ReadUserVersion());
+        Assert.Equal(3, ReadUserVersion());
         Assert.Single(Open().GetConversation(Peer));
-        Assert.Equal(2, ReadUserVersion());
+        Assert.Equal(3, ReadUserVersion());
     }
 
     /// <summary>The exact schema 0.7.0 shipped, with a message in each state: real databases look like this.</summary>
@@ -361,7 +361,7 @@ public sealed class SqliteMessageStoreTests : IDisposable
         Assert.Null(store.GetConversation(Peer)[0].GroupId);
         Assert.False(store.TryAddIncoming(Incoming(read)));
         store.Dispose();
-        Assert.Equal(2, ReadUserVersion());
+        Assert.Equal(3, ReadUserVersion());
     }
 
     private const string GroupA = "group-a";
@@ -500,6 +500,26 @@ public sealed class SqliteMessageStoreTests : IDisposable
 
         Assert.Equal(DirectConversation.IdFor(a, b), DirectConversation.IdFor(b, a));
         Assert.Equal(64, DirectConversation.IdFor(a, b).Length);
+    }
+
+    [Fact]
+    public void Transfer_OnlyMovesFromTheStatesAllowed_AndAnEndedOneStaysEnded()
+    {
+        var store = Open();
+        var id = Guid.NewGuid();
+        store.AddTransfer(new Roomie.Core.Files.StoredTransfer(id, Peer, MessageDirection.Outgoing, "a.txt", 1, new string('a', 64), "text/plain", Roomie.Core.Files.FileTransferState.Waiting, Start, "C:\\a.txt"));
+
+        Assert.False(store.TryMoveTransfer(Peer, MessageDirection.Outgoing, id, Roomie.Core.Files.FileTransferState.Verifying, null, null, Roomie.Core.Files.FileTransferState.Transferring));
+        Assert.Equal(Roomie.Core.Files.FileTransferState.Waiting, store.GetTransfer(Peer, MessageDirection.Outgoing, id)!.State);
+        Assert.Equal("C:\\a.txt", store.GetTransfer(Peer, MessageDirection.Outgoing, id)!.LocalPath);
+
+        Assert.True(store.TryMoveTransfer(Peer, MessageDirection.Outgoing, id, Roomie.Core.Files.FileTransferState.Canceled, "C:\\a.txt", null, Roomie.Core.Files.FileTransferState.Waiting));
+        Assert.False(store.TryMoveTransfer(Peer, MessageDirection.Outgoing, id, Roomie.Core.Files.FileTransferState.Offered, null, null, Roomie.Core.Files.FileTransferState.Waiting));
+        Assert.Equal(Roomie.Core.Files.FileTransferState.Canceled, store.GetTransfer(Peer, MessageDirection.Outgoing, id)!.State);
+
+        // Another device, and the other direction, are different transfers.
+        Assert.False(store.TryMoveTransfer(Guid.NewGuid(), MessageDirection.Outgoing, id, Roomie.Core.Files.FileTransferState.Failed, null, null, Roomie.Core.Files.FileTransferState.Canceled));
+        Assert.False(store.TryMoveTransfer(Peer, MessageDirection.Incoming, id, Roomie.Core.Files.FileTransferState.Failed, null, null, Roomie.Core.Files.FileTransferState.Canceled));
     }
 
     private long ReadUserVersion()

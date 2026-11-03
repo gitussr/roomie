@@ -944,6 +944,32 @@ After transfer, calculate the SHA-256 hash of the received file and compare it w
 
 Remember: the hash verifies file integrity against accidental corruption; TLS protects the connection. Neither makes a malicious sender trustworthy.
 
+### File transfer as implemented
+
+Payloads, in addition to `FILE_OFFER` above:
+
+| Message | Payload |
+| ------- | ------- |
+| `FILE_ACCEPT` | `transferId` |
+| `FILE_REJECT` | `transferId`, `reason`: `declined`, `canceled`, `failed` or `busy`. Ends a transfer from either side at any stage |
+| `FILE_COMPLETE` | `transferId`: every byte was sent |
+| `FILE_ACK` | `transferId`, `verified`: whether the received file matched the offered hash |
+
+`reason` is a fixed word so that what the user reads is never text a peer chose.
+
+Rules:
+
+- **Nothing is written without acceptance.** An offer only creates a record. The temporary file is created when the user accepts, after checking that the disk would keep 50 MB free.
+- **Chunks.** Frames with no valid format, and any on a session that isn't paired or didn't agree the `file-transfer` capability, close the session, because the sender can't have meant them. A well-formed chunk for an unknown or unaccepted transfer, or from another device, gets `TRANSFER_REJECTED`, which counts towards the limit on refusals (§5.4). Chunks for a transfer that has ended are dropped silently, since some are always on their way. An out-of-order chunk, one past the offered size, or a third simultaneous file fails that transfer.
+- **Where files go.** Files stay in `files\incoming` until verified, then move to `files\downloads`. Roomie empties `files\incoming` when it starts. Verifying hashes the bytes read back from disk.
+- **Names (§10, rule 5).** An offered name is never a path. Separators and characters Windows forbids become `_`. Invisible formatting characters are removed, including the right-to-left override that can disguise `gpj.exe` as `exe.jpg`. Trailing dots and spaces are removed, because Windows would drop them and change the extension. Names Windows reserves, such as `CON`, get a `_` prefix. A name already taken gets a number, and nothing is ever overwritten.
+- **After arrival.** Roomie never opens a received file, and only offers to show it in its folder. The file gets the same `Zone.Identifier` mark a browser's download gets, so Windows warns before running it. Offers of files that can run programs carry a warning.
+- **Stopping.** A write in progress is never interrupted, because half a frame would end the session and everything on it. Canceling takes effect between chunks.
+- **Interruptions.** There is no resuming. A lost connection or restart fails a transfer on both sides, removes what had arrived, and offers **Send again**. An offer not yet answered survives both, and is sent again on each session, recognized by its ID. If everything was sent but the answer never arrived, the sender asks again with `FILE_COMPLETE` on the next session.
+- **Limits.** 100 MB per file, two files moving at once per device in each direction, and 20 unanswered offers from one device, after which further offers get `busy`.
+
+**Not in V1.** Files go to one device at a time, not to a group. Sending reads the original file, so changing it while it waits or moves makes the transfer fail rather than sending something else. Received files stay where they are if the transfer's history is gone, and Roomie has no way to delete them.
+
 # 9. Protocol versioning and compatibility
 
 The protocol must evolve without breaking existing installations.

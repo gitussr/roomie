@@ -4,6 +4,7 @@ using System.Security.Authentication;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Roomie.Core.Connections;
+using Roomie.Core.Files;
 using Roomie.Core.Protocol;
 
 namespace Roomie.Network.Connections;
@@ -167,6 +168,33 @@ public sealed partial class PeerSession : IAsyncDisposable
         await WriteAsync(new RmpEnvelope(type, messageId, LocalDeviceId, RemoteDeviceId, timestamp, payload), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Sends one file chunk. Other messages can go out between chunks, because each frame takes the write lock separately.</summary>
+    /// <exception cref="InvalidOperationException">The session is closed, or files aren't allowed on it.</exception>
+    public async Task SendChunkAsync(Guid transferId, uint sequence, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        if (!IsTrusted || !Supports(RmpCapabilities.FileTransfer))
+        {
+            throw new InvalidOperationException("File chunks are not allowed on this session.");
+        }
+
+        if (IsClosed)
+        {
+            throw new InvalidOperationException("The session is closed.");
+        }
+
+        var frame = FileChunk.Encode(transferId, sequence, data.Span);
+        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _stream.WriteAsync(frame, cancellationToken).ConfigureAwait(false);
+            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
     /// <summary>Closes the session, first telling the peer why when <paramref name="goodbyeReason"/> is given.</summary>
     public Task CloseAsync(string? goodbyeReason, string description) =>
         ShutdownAsync(new SessionCloseInfo(SessionCloseKind.Local, description, goodbyeReason),
@@ -202,9 +230,12 @@ public sealed partial class PeerSession : IAsyncDisposable
 
                 if (frame.Value.Type != RmpFrameType.Control)
                 {
-                    // File transfer arrives in phase 9; until then a chunk frame is a protocol violation.
-                    await FailAsync(RmpErrorCodes.InvalidFrame, "File chunks are not supported on this session.").ConfigureAwait(false);
-                    return;
+                    if (!await HandleChunkAsync(frame.Value, cancellationToken).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
+                    continue;
                 }
 
                 if (!RmpEnvelopeCodec.TryDecode(frame.Value.Payload, out var envelope, out var error))
@@ -239,6 +270,30 @@ public sealed partial class PeerSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// A chunk that can't be parsed, or that no agreement allows, breaks the protocol and closes the session,
+    /// because the sender can't have meant it. One that is well-formed but unexpected is only refused.
+    /// </summary>
+    /// <returns>False when the session has ended.</returns>
+    private async Task<bool> HandleChunkAsync(RmpFrame frame, CancellationToken cancellationToken)
+    {
+        if (!IsTrusted || !Supports(RmpCapabilities.FileTransfer))
+        {
+            await FailAsync(RmpErrorCodes.InvalidFrame, "File chunks are not allowed on this session.").ConfigureAwait(false);
+            return false;
+        }
+
+        if (!FileChunk.TryParse(frame.Payload, out var chunk))
+        {
+            await FailAsync(RmpErrorCodes.InvalidFrame, "That file chunk is malformed.").ConfigureAwait(false);
+            return false;
+        }
+
+        return await _dispatcher.DispatchChunkAsync(this, chunk, cancellationToken).ConfigureAwait(false) is { } failed
+            ? await RejectAsync(RmpMessageTypes.FileChunk, chunk.TransferId, failed, cancellationToken).ConfigureAwait(false)
+            : true;
+    }
+
     /// <returns>False when the session has ended.</returns>
     private async Task<bool> HandleAsync(RmpEnvelope envelope, CancellationToken cancellationToken)
     {
@@ -260,7 +315,7 @@ public sealed partial class PeerSession : IAsyncDisposable
 
         if (RmpMessagePolicy.Check(envelope.Type, envelope.Payload, IsTrusted, Capabilities) is { } refused)
         {
-            return await RejectAsync(envelope, refused, cancellationToken).ConfigureAwait(false);
+            return await RejectAsync(envelope.Type, envelope.MessageId, refused, cancellationToken).ConfigureAwait(false);
         }
 
         switch (envelope.Type)
@@ -274,7 +329,7 @@ public sealed partial class PeerSession : IAsyncDisposable
         }
 
         return await _dispatcher.DispatchAsync(this, envelope, cancellationToken).ConfigureAwait(false) is { } failed
-            ? await RejectAsync(envelope, failed, cancellationToken).ConfigureAwait(false)
+            ? await RejectAsync(envelope.Type, envelope.MessageId, failed, cancellationToken).ConfigureAwait(false)
             : true;
     }
 
@@ -293,17 +348,17 @@ public sealed partial class PeerSession : IAsyncDisposable
 
     /// <summary>Refuses one message and keeps the session, unless the peer has used up its allowance of refusals.</summary>
     /// <returns>False when the session has ended.</returns>
-    private async Task<bool> RejectAsync(RmpEnvelope envelope, RmpRejection rejection, CancellationToken cancellationToken)
+    private async Task<bool> RejectAsync(string type, Guid requestId, RmpRejection rejection, CancellationToken cancellationToken)
     {
-        LogMessageRefused(_logger, envelope.Type, RemoteDeviceId, rejection.Code);
+        LogMessageRefused(_logger, type, RemoteDeviceId, rejection.Code);
 
         if (!_rejections.TryAcquire(RemoteEndPoint.Address))
         {
-            await FailAsync(RmpErrorCodes.RateLimited, "Too many refused messages.", envelope.MessageId).ConfigureAwait(false);
+            await FailAsync(RmpErrorCodes.RateLimited, "Too many refused messages.", requestId).ConfigureAwait(false);
             return false;
         }
 
-        var error = new ErrorPayload(rejection.Code, rejection.Message, envelope.MessageId);
+        var error = new ErrorPayload(rejection.Code, rejection.Message, requestId);
         await WriteAsync(RmpEnvelope.Create(RmpMessageTypes.Error, LocalDeviceId, RemoteDeviceId, _time.GetUtcNow(), SessionPayloads.ToElement(error)), cancellationToken).ConfigureAwait(false);
         return true;
     }

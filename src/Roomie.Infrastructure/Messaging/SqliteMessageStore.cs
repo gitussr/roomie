@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Messaging;
 
@@ -10,8 +11,10 @@ namespace Roomie.Infrastructure.Messaging;
 /// Message history in <c>database\messenger.db</c> (architecture.md §6). Each call commits before it returns,
 /// with a full sync to disk, because an acknowledgement promises the recipient has the message.
 /// </summary>
-public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IDisposable
+public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFileTransferStore, IDisposable
 {
+    private const string TransferColumns = "transfer_id, peer_id, direction, filename, file_size, sha256, content_type, state, created_ms, local_path, failure";
+
     private const int Outgoing = 0;
     private const int Incoming = 1;
 
@@ -95,6 +98,28 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IDi
         ) STRICT, WITHOUT ROWID;
 
         PRAGMA user_version = 2;
+        """,
+
+        // state holds the numbers of FileTransferState, and direction the codes of messages.direction.
+        """
+        CREATE TABLE file_transfers (
+            transfer_id TEXT NOT NULL,
+            peer_id TEXT NOT NULL,
+            direction INTEGER NOT NULL CHECK (direction IN (0, 1)),
+            filename TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 8),
+            created_ms INTEGER NOT NULL,
+            local_path TEXT,
+            failure TEXT,
+            PRIMARY KEY (peer_id, direction, transfer_id)
+        ) STRICT;
+        CREATE INDEX file_transfers_by_time ON file_transfers (peer_id, created_ms);
+        CREATE INDEX file_transfers_open ON file_transfers (state) WHERE state < 5;
+
+        PRAGMA user_version = 3;
         """,
     ];
 
@@ -270,6 +295,64 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IDi
     public IReadOnlyDictionary<string, int> GetGroupUnreadCounts() => Run(() => Query(
         "SELECT group_id, COUNT(*) FROM messages WHERE direction = 1 AND state < 4 AND group_id IS NOT NULL GROUP BY group_id",
         reader => (Group: reader.GetString(0), Count: reader.GetInt32(1))).ToDictionary(r => r.Group, r => r.Count));
+
+    public void AddTransfer(StoredTransfer transfer)
+    {
+        ArgumentNullException.ThrowIfNull(transfer);
+        Run(() => Execute(
+            $"INSERT INTO file_transfers ({TransferColumns}) VALUES ($id, $peer, $direction, $name, $size, $hash, $type, $state, $created, $path, $failure)",
+            ("$id", Text(transfer.TransferId)),
+            ("$peer", Text(transfer.PeerId)),
+            ("$direction", transfer.Direction == MessageDirection.Incoming ? Incoming : Outgoing),
+            ("$name", transfer.Filename),
+            ("$size", transfer.FileSize),
+            ("$hash", transfer.Sha256),
+            ("$type", transfer.ContentType),
+            ("$state", (int)transfer.State),
+            ("$created", transfer.CreatedAt.ToUnixTimeMilliseconds()),
+            ("$path", transfer.LocalPath),
+            ("$failure", transfer.Failure)));
+    }
+
+    public StoredTransfer? GetTransfer(Guid peerId, MessageDirection direction, Guid transferId) => Run(() => Query(
+        $"SELECT {TransferColumns} FROM file_transfers WHERE peer_id = $peer AND direction = $direction AND transfer_id = $id",
+        ReadTransfer,
+        ("$peer", Text(peerId)),
+        ("$direction", direction == MessageDirection.Incoming ? Incoming : Outgoing),
+        ("$id", Text(transferId))).SingleOrDefault());
+
+    public IReadOnlyList<StoredTransfer> GetTransfers(Guid peerId, int maxTransfers) => Run(() => Query(
+        $"SELECT {TransferColumns} FROM file_transfers WHERE peer_id = $peer ORDER BY created_ms DESC, rowid DESC LIMIT $limit",
+        ReadTransfer,
+        ("$peer", Text(peerId)),
+        ("$limit", maxTransfers)));
+
+    public IReadOnlyList<StoredTransfer> GetOpenTransfers() => Run(() => Query(
+        $"SELECT {TransferColumns} FROM file_transfers WHERE state < 5",
+        ReadTransfer));
+
+    public void UpdateTransfer(Guid peerId, MessageDirection direction, Guid transferId, FileTransferState state, string? localPath, string? failure) => Run(() => Execute(
+        "UPDATE file_transfers SET state = $state, local_path = $path, failure = $failure WHERE peer_id = $peer AND direction = $direction AND transfer_id = $id",
+        ("$state", (int)state),
+        ("$path", localPath),
+        ("$failure", failure),
+        ("$peer", Text(peerId)),
+        ("$direction", direction == MessageDirection.Incoming ? Incoming : Outgoing),
+        ("$id", Text(transferId))));
+
+    public bool TryMoveTransfer(Guid peerId, MessageDirection direction, Guid transferId, FileTransferState state, string? localPath, string? failure, params FileTransferState[] from)
+    {
+        ArgumentNullException.ThrowIfNull(from);
+        var allowed = string.Join(", ", from.Select(s => ((int)s).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        return Run(() => Execute(
+            $"UPDATE file_transfers SET state = $state, local_path = $path, failure = $failure WHERE peer_id = $peer AND direction = $direction AND transfer_id = $id AND state IN ({allowed})",
+            ("$state", (int)state),
+            ("$path", localPath),
+            ("$failure", failure),
+            ("$peer", Text(peerId)),
+            ("$direction", direction == MessageDirection.Incoming ? Incoming : Outgoing),
+            ("$id", Text(transferId))) > 0);
+    }
 
     public StoredGroup? GetGroup(string groupId) => Run(() => Query(
         "SELECT document, signature, version, is_member FROM groups WHERE group_id = $group",
@@ -528,6 +611,19 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IDi
         reader.GetInt32(7) != 0,
         reader.IsDBNull(8) ? null : reader.GetString(8),
         reader.IsDBNull(9) ? null : reader.GetInt32(9));
+
+    private static StoredTransfer ReadTransfer(SqliteDataReader reader) => new(
+        reader.GetGuid(0),
+        reader.GetGuid(1),
+        reader.GetInt32(2) == Incoming ? MessageDirection.Incoming : MessageDirection.Outgoing,
+        reader.GetString(3),
+        reader.GetInt64(4),
+        reader.GetString(5),
+        reader.GetString(6),
+        (FileTransferState)reader.GetInt32(7),
+        DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(8)),
+        reader.IsDBNull(9) ? null : reader.GetString(9),
+        reader.IsDBNull(10) ? null : reader.GetString(10));
 
     private static StoredGroup ReadGroup(SqliteDataReader reader)
     {

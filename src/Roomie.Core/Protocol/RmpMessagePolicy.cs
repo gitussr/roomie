@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Roomie.Core.Files;
 using Roomie.Core.Groups;
 
 namespace Roomie.Core.Protocol;
@@ -90,11 +91,11 @@ public static class RmpMessagePolicy
         new(RmpMessageTypes.GroupStateRequest, Small, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckStateRequest),
 
         new(RmpMessageTypes.FileOffer, Metadata, RequiredCapability: RmpCapabilities.FileTransfer, Validate: ContentPayloads.CheckFileOffer),
-        new(RmpMessageTypes.FileAccept, Small, RequiredCapability: RmpCapabilities.FileTransfer),
-        new(RmpMessageTypes.FileReject, Small, RequiredCapability: RmpCapabilities.FileTransfer),
+        new(RmpMessageTypes.FileAccept, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckAccept),
+        new(RmpMessageTypes.FileReject, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckReject),
         new(RmpMessageTypes.FileChunk, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: NeverAControlMessage),
-        new(RmpMessageTypes.FileComplete, Small, RequiredCapability: RmpCapabilities.FileTransfer),
-        new(RmpMessageTypes.FileAck, Small, RequiredCapability: RmpCapabilities.FileTransfer),
+        new(RmpMessageTypes.FileComplete, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckComplete),
+        new(RmpMessageTypes.FileAck, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckAck),
     }.ToDictionary(spec => spec.Type, StringComparer.Ordinal);
 
     public static IEnumerable<string> KnownTypes => Specs.Keys;

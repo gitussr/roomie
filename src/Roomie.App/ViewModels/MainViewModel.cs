@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.Input;
 using Roomie.Core.Configuration;
 using Roomie.Core.Connections;
 using Roomie.Core.Discovery;
+using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
@@ -13,6 +14,7 @@ using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Storage;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
+using Roomie.Network.Files;
 using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
@@ -50,6 +52,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly ConnectionManager _connections;
     private readonly PairingService _pairing;
     private readonly GroupService _groups;
+    private readonly FileTransferService _files;
     private readonly ITrustStore _trust;
     private readonly IMessageStore _messages;
     private readonly SynchronizationContext _ui;
@@ -64,13 +67,15 @@ public sealed partial class MainViewModel : ObservableObject
         PairingService pairing,
         MessagingService messaging,
         GroupService groups,
+        FileTransferService files,
         IMessageStore messages,
         ITrustStore trust)
     {
         ArgumentNullException.ThrowIfNull(messaging);
         _messages = messages;
         _groups = groups;
-        Chat = new ChatViewModel(messaging, groups, messages, trust, identityStore);
+        _files = files;
+        Chat = new ChatViewModel(messaging, groups, files, messages, trust, identityStore);
 
         _identityStore = identityStore;
         _registry = registry;
@@ -101,6 +106,11 @@ public sealed partial class MainViewModel : ObservableObject
         messaging.Changed += (_, _) => QueueRefresh();
         groups.Changed += (_, _) => QueueRefresh();
         groups.IncomingInvite += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
+        files.Changed += (_, _) => QueueRefresh();
+        files.IncomingOffer += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
+
+        // Only the file list: rebuilding the device list this often would make its buttons hard to click.
+        files.ProgressChanged += (_, _) => _ui.Post(_ => Chat.RefreshFiles(), null);
         Refresh();
     }
 
@@ -435,7 +445,15 @@ public sealed partial class MainViewModel : ObservableObject
     {
         try
         {
-            return _messages.GetActiveConversations().ToDictionary(c => c.PeerId, c => c.UnreadCount);
+            var counts = _messages.GetActiveConversations().ToDictionary(c => c.PeerId, c => c.UnreadCount);
+
+            // A file waiting for an answer needs the user's attention just as a message does.
+            foreach (var offer in _files.GetOpenTransfers().Where(t => t is { Direction: MessageDirection.Incoming, State: FileTransferState.Offered }))
+            {
+                counts[offer.PeerId] = counts.GetValueOrDefault(offer.PeerId) + 1;
+            }
+
+            return counts;
         }
         catch (MessageStoreException)
         {
