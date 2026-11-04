@@ -17,7 +17,25 @@ Roomie is a peer-to-peer LAN messenger for Windows. It needs no server, internet
 - **Phase 10 (Windows interface), done.** Roomie now has **Chats**, **Devices**, **Transfers** and **Settings** screens, light and dark themes that can follow Windows, and an icon in the notification area. Closing the window leaves Roomie running so messages and files keep arriving, and it can start when you sign in. Windows notifications announce messages, files and pairing requests, and the taskbar button flashes and shows a count and a transfer's progress. Files can be dragged onto a conversation or pasted into it. Received files now go to your Windows Downloads folder by default, or any folder you choose, and an unfinished file is kept on that same drive. Opening Roomie a second time shows the one already running. The rules are in architecture.md §8 and §15.
 - **Profile pictures and logo reveal (0.11.0).** In **Settings**, choose one of 12 built-in avatars or upload your own picture. Paired devices see it in their chats and device list. Roomie opens with a short animated logo reveal, which any click or key skips. It doesn't play when Roomie starts by itself at sign-in or when the window comes back from the notification area, or if animations are off in Windows. Details are in architecture.md §15.
 - **First-run welcome and emoji (0.12.0).** A new install walks you through naming the computer and pairing with another, and any step can be skipped. Someone updating with a paired device doesn't see it, and **Settings** > **About** can show it again. The **😀** button by the message box adds an emoji where the cursor is. Windows 10's `Win`+`.` panel works there too. Emoji are ordinary text, so older versions of Roomie receive them as usual.
-- **Next: sounds and small animations,** then Phase 11, security and network testing and the MSIX release.
+- **Sounds and small animations (0.13.1).** Most Windows PCs can't vibrate, so these give Roomie its feel instead. Short, soft sounds announce a message in a conversation you aren't looking at, a file offered, a transfer finished or failed, and a pairing request. **Settings** > **Notifications** turns them off and can play a test sound, and they stay silent during Focus Assist and full-screen games or presentations. A message you send rises into place, an unread count pops, buttons respond to being pressed, a finished transfer shows a tick, and the drop area fades in. All the animations are off when animations are off in Windows.
+- **Next: Phase 11,** security and network testing and the MSIX release.
+
+### Testing sounds and animations on two PCs
+
+Choose **Exit Roomie** from the notification-area icon first. If a different version is still running, the new one says so and doesn't open. Run 0.13.1 on both PCs, with the speakers on, and check **Settings** > **About** shows 0.13.1. **Settings** > **Notifications** > **Play a test sound** should play one on each PC, also with sounds turned off. If it's silent, check the PC's volume first. Only your own ears can say whether these sounds are right, so please say if any is too loud, too quiet or annoying.
+
+Your own picture now shows at the bottom of the left rail, above **Settings**. Change it in **Settings**: the rail should update straight away, and the other PC should show the same picture.
+
+1. With the chat with PC B open and in front on PC A, send a message from B: no sound on A. Put another window in front, or open a different chat, and send again: a sound. Send several quickly: only one sound in about 5 seconds.
+2. Offer a file from B: a different, rising sound on A. Accept it. When it finishes, both PCs should play a brighter sound and show a green tick that pops in on that transfer. Older finished transfers should show the tick without any movement.
+3. Make a transfer fail, for example by receiving a file too large for the chosen drive. A low, falling sound should play. Canceling and declining are silent.
+4. Start pairing from B: A should play a repeated two-note sound.
+5. In **Settings** > **Notifications**, turn sounds off: none of the above should sound. Turn them on again: it should play one so you can hear it. Close and reopen Roomie: the choice should stay.
+6. Turn on Focus Assist (the action centre, or **Settings** > **System** > **Focus assist**), in **Priority only** and then **Alarms only**, and send a message: no sound. Turn it off: the sound returns.
+7. Send a message: its bubble should rise and fade in once. It shouldn't move again when its status changes to *Delivered*, or when you close and reopen the chat.
+8. With the window behind another, send messages from B: the count on **Chats** and on that conversation should pop each time it goes up, and not when it goes down.
+9. Press and hold any button with the mouse: it should shrink slightly, then return when released, also if you drag off it first. Drag a file over a conversation: the drop area should fade in, without flickering as you move around.
+10. Turn off **Settings** > **Ease of Access** > **Display** > **Show animations in Windows**, and repeat 7 to 9: nothing should move, and everything should still work. Turn it back on if you want it.
 
 ### Testing the welcome and emoji on two PCs
 

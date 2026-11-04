@@ -103,6 +103,7 @@
                                             <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding Time}" Style="{StaticResource MutedText}" TextWrapping="NoWrap" FontSize="11" VerticalAlignment="Center" />
                                             <TextBlock Grid.Row="1" Margin="0,2,0,0" Text="{Binding Preview}" Style="{StaticResource MutedText}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                                             <Border Grid.Row="1" Grid.Column="1" Margin="8,2,0,0" Style="{StaticResource Badge}" HorizontalAlignment="Right"
+                                                    Loaded="OnRowBadgeLoaded"
                                                     Visibility="{Binding HasUnread, Converter={StaticResource BoolToVisibility}}">
                                                 <TextBlock Text="{Binding Unread}" Style="{StaticResource BadgeText}" />
                                             </Border>
@@ -264,7 +265,7 @@
                         <ItemsControl ItemsSource="{Binding Chat.Messages}" Focusable="False" AutomationProperties.Name="Messages">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate DataType="{x:Type vm:ChatBubble}">
-                                    <Border Margin="0,4" Padding="12,7" MaxWidth="520" CornerRadius="10">
+                                    <Border Margin="0,4" Padding="12,7" MaxWidth="520" CornerRadius="10" Loaded="OnBubbleLoaded">
                                         <Border.Style>
                                             <Style TargetType="Border">
                                                 <Setter Property="HorizontalAlignment" Value="Left" />

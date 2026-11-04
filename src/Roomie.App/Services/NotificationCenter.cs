@@ -4,6 +4,7 @@ using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
+using Roomie.Core.Sounds;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Storage;
 using Roomie.Network.Files;
@@ -19,12 +20,15 @@ public sealed class NotificationCenter
     /// <summary>A burst of messages from one device gives one notification, because Windows would queue them all.</summary>
     private static readonly TimeSpan QuietPeriod = TimeSpan.FromSeconds(5);
 
+    private const string PairingSoundKey = "pairing request";
+
     private readonly MessagingService _messaging;
     private readonly FileTransferService _files;
     private readonly GroupService _groups;
     private readonly ITrustStore _trust;
     private readonly JsonSettingsStore _settings;
     private readonly MainViewModel _main;
+    private readonly SoundService _sounds;
     private readonly TransferWatcher _watcher = new();
     private readonly SynchronizationContext _ui;
     private readonly Dictionary<string, DateTimeOffset> _lastShown = [];
@@ -38,8 +42,10 @@ public sealed class NotificationCenter
         PairingService pairing,
         ITrustStore trust,
         JsonSettingsStore settings,
-        MainViewModel main)
+        MainViewModel main,
+        SoundService sounds)
     {
+        _sounds = sounds;
         _messaging = messaging;
         _files = files;
         _groups = groups;
@@ -89,6 +95,7 @@ public sealed class NotificationCenter
                 return;
             }
 
+            _sounds.Play(SoundEffect.Message);
             var sender = NameOf(message.PeerId);
             var title = message.GroupId is { } groupId ? $"{sender} in {GroupName(groupId)}" : sender;
             Show(title, _settings.Current.ShowMessageText ? message.Content : "New message", target);
@@ -121,9 +128,25 @@ public sealed class NotificationCenter
                 _ => null,
             };
 
+            SoundEffect? sound = kind switch
+            {
+                TransferNews.Offered => SoundEffect.FileOffered,
+                TransferNews.Completed => SoundEffect.TransferFinished,
+                TransferNews.Failed => SoundEffect.TransferFailed,
+                _ => null,
+            };
+
             if (text is { } shown)
             {
-                _ui.Post(_ => Show(shown.Title, shown.Body, new NotificationTarget(ShowTransfers: true)), null);
+                _ui.Post(_ =>
+                {
+                    if (sound is { } effect)
+                    {
+                        _sounds.Play(effect);
+                    }
+
+                    Show(shown.Title, shown.Body, new NotificationTarget(ShowTransfers: true));
+                }, null);
             }
         }
     }
@@ -160,7 +183,16 @@ public sealed class NotificationCenter
     {
         // A pairing has no verified name yet: anyone on the network can call themselves anything.
         var name = info.PeerName;
-        _ui.Post(_ => Show("A device wants to pair", $"It calls itself {name}. Only pair if you expected this.", null), null);
+        _ui.Post(_ =>
+        {
+            // Anyone on the network can ask, so asking repeatedly mustn't turn into a noise.
+            if (IsAllowed(PairingSoundKey))
+            {
+                _sounds.Play(SoundEffect.PairingRequest);
+            }
+
+            Show("A device wants to pair", $"It calls itself {name}. Only pair if you expected this.", null);
+        }, null);
     }
 
     private void Show(string title, string body, NotificationTarget? target)

@@ -52,6 +52,9 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
 
     public ObservableCollection<ChatBubble> Messages { get; } = [];
 
+    /// <summary>This conversation's history is on screen, so a message added from now on really is new.</summary>
+    public bool HasLoadedMessages { get; private set; }
+
     public ObservableCollection<GroupMemberItem> Members { get; } = [];
 
     public ObservableCollection<GroupInviteCandidate> InviteCandidates { get; } = [];
@@ -430,6 +433,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     {
         Draft = string.Empty;
         SendError = null;
+        HasLoadedMessages = false;
         Messages.Clear();
         Members.Clear();
         InviteCandidates.Clear();
@@ -445,6 +449,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
             var messages = read();
             HasOlderMessages = messages.Count > MaxShownMessages;
             Sync(messages.Skip(messages.Count - Math.Min(messages.Count, MaxShownMessages)).Select(toBubble).ToList());
+            HasLoadedMessages = true;
         }
         catch (MessageStoreException)
         {

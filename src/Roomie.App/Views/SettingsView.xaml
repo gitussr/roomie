@@ -85,6 +85,10 @@
             <CheckBox IsChecked="{Binding Settings.ShowMessageText}" IsEnabled="{Binding Settings.Notifications}">
                 <TextBlock TextWrapping="Wrap" Text="Include the message text. Turn this off if others can see this screen." />
             </CheckBox>
+            <CheckBox IsChecked="{Binding Settings.PlaySounds}">
+                <TextBlock TextWrapping="Wrap" Text="Play sounds for messages, files and pairing requests. They stay silent during Focus Assist and full-screen games or presentations." />
+            </CheckBox>
+            <Button Margin="0,6,0,0" HorizontalAlignment="Left" Content="Play a test sound" Command="{Binding Settings.TestSoundCommand}" />
 
             <TextBlock Margin="0,24,0,6" Text="About" Style="{StaticResource SectionText}" />
             <TextBlock Style="{StaticResource MutedText}">

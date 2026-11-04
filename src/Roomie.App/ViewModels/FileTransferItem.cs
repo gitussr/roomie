@@ -51,6 +51,10 @@ public sealed partial class FileTransferItem(Guid transferId, Guid peerId, Messa
     [ObservableProperty]
     private bool _isProblem;
 
+    /// <summary>It arrived, or the other side has it, and the hash matched.</summary>
+    [ObservableProperty]
+    private bool _isFinished;
+
     [ObservableProperty]
     private bool _canAnswer;
 
@@ -109,6 +113,7 @@ public sealed partial class FileTransferItem(Guid transferId, Guid peerId, Messa
         IsActive = IsMoving && !isPaused;
         Percent = transfer.FileSize > 0 ? Math.Min(100, moved * 100d / transfer.FileSize) : 0;
         IsProblem = transfer.State == FileTransferState.Failed;
+        IsFinished = transfer.State == FileTransferState.Completed;
         CanAnswer = incoming && transfer.State == FileTransferState.Offered;
         CanCancel = !CanAnswer && transfer.State < FileTransferState.Verifying;
         CanShow = incoming && transfer.State == FileTransferState.Completed;

@@ -22,7 +22,8 @@ public sealed record AppSettings(
     bool ShowMessageText = true,
     string? ReceiveFolder = null,
     bool HasSeenTrayHint = false,
-    bool HasSeenWelcome = false)
+    bool HasSeenWelcome = false,
+    bool Sounds = true)
 {
     /// <summary>
     /// Whether to walk this user through naming and pairing. Someone with a paired device already knows how, which is

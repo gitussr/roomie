@@ -55,6 +55,12 @@
                         <TextBlock Text="Settings" FontSize="11" Margin="0,4,0,0" HorizontalAlignment="Center" />
                     </StackPanel>
                 </RadioButton>
+                <!-- This computer, as paired devices see it. -->
+                <StackPanel DockPanel.Dock="Bottom" Margin="4,0,4,8" ToolTip="{Binding Username}"
+                            AutomationProperties.Name="{Binding Username, StringFormat='This computer: {0}'}">
+                    <views:AvatarView Width="36" Height="36" HorizontalAlignment="Center" Avatar="{Binding Settings.OwnAvatar}" />
+                    <TextBlock Margin="0,3,0,0" HorizontalAlignment="Center" FontSize="11" Text="{Binding Username}" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
                 <StackPanel>
                     <RadioButton GroupName="Rail" Style="{StaticResource RailButton}" AutomationProperties.Name="Chats"
                                  IsChecked="{Binding Section, Converter={StaticResource SectionChecked}, ConverterParameter=Chats}">
@@ -64,6 +70,7 @@
                                 <TextBlock Text="Chats" FontSize="11" Margin="0,4,0,0" HorizontalAlignment="Center" />
                             </StackPanel>
                             <Border Style="{StaticResource Badge}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-6,-12,0"
+                                    views:Motion.PopOnIncrease="{Binding TotalUnread}"
                                     Visibility="{Binding TotalUnread, Converter={StaticResource CountVisible}}">
                                 <TextBlock Text="{Binding TotalUnread}" Style="{StaticResource BadgeText}" AutomationProperties.Name="{Binding TotalUnread, StringFormat='{}{0} unread'}" />
                             </Border>

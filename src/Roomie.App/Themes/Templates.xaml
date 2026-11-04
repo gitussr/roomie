@@ -1,6 +1,7 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-                    xmlns:vm="clr-namespace:Roomie.App.ViewModels">
+                    xmlns:vm="clr-namespace:Roomie.App.ViewModels"
+                    xmlns:views="clr-namespace:Roomie.App.Views">
 
     <!-- One file transfer, shown the same way in a conversation and on the Transfers screen. -->
     <DataTemplate DataType="{x:Type vm:FileTransferItem}">
@@ -8,6 +9,10 @@
             <DockPanel>
                 <TextBlock DockPanel.Dock="Left" Margin="0,2,10,0" FontFamily="Segoe MDL2 Assets" FontSize="16" Text="{Binding DirectionGlyph}"
                            Foreground="{DynamicResource MutedTextBrush}" AutomationProperties.Name="{Binding DirectionLabel}" />
+                <TextBlock DockPanel.Dock="Right" Margin="10,2,0,0" VerticalAlignment="Top" FontFamily="Segoe MDL2 Assets" FontSize="18" Text="&#xE73E;"
+                           Foreground="{DynamicResource SuccessBrush}" AutomationProperties.Name="Finished"
+                           views:Motion.PopWhenTrue="{Binding IsFinished}"
+                           Visibility="{Binding IsFinished, Converter={StaticResource BoolToVisibility}}" />
                 <StackPanel>
                     <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}" />
                     <TextBlock Text="{Binding PeerLine}" Style="{StaticResource MutedWhenEmpty}" />

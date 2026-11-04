@@ -12,8 +12,14 @@ public partial class ChatsView : UserControl
 {
     private const long EmojiReopenDelayMs = 250;
 
+    /// <summary>Dragging across the parts of a conversation leaves one and enters the next, which isn't really leaving.</summary>
+    private const long DropReappearMs = 150;
+
+    private readonly HashSet<Guid> _justSent = [];
+    private readonly Dictionary<string, int> _shownUnread = [];
     private ChatViewModel? _chat;
     private long _emojiClosedAt = -EmojiReopenDelayMs - 1;
+    private long _dropHiddenAt = -DropReappearMs - 1;
 
     public ChatsView()
     {
@@ -53,7 +59,42 @@ public partial class ChatsView : UserControl
         if (e.Action == NotifyCollectionChangedAction.Add)
         {
             MessageScroller.ScrollToEnd();
+
+            // Not while a conversation opens, when its whole history counts as added.
+            if (_chat is { HasLoadedMessages: true } && e.NewItems?[0] is ChatBubble { IsMine: true } sent)
+            {
+                _justSent.Add(sent.MessageId);
+            }
         }
+    }
+
+    /// <summary>
+    /// A bubble is drawn again each time its status changes, so this goes by the message and only the first time.
+    /// It's done here because this runs just before the bubble is first drawn, so it never flashes in its final place.
+    /// </summary>
+    private void OnBubbleLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: ChatBubble bubble } element && _justSent.Remove(bubble.MessageId))
+        {
+            Motion.SlideUp(element);
+        }
+    }
+
+    /// <summary>A row is rebuilt whenever anything about it changes, so the count it last showed is kept here.</summary>
+    private void OnRowBadgeLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: ConversationItem row } badge)
+        {
+            return;
+        }
+
+        var key = row.GroupId ?? row.PeerId?.ToString() ?? string.Empty;
+        if (_shownUnread.TryGetValue(key, out var shown) && row.Unread > shown)
+        {
+            Motion.Pop(badge);
+        }
+
+        _shownUnread[key] = row.Unread;
     }
 
     private void OnFindDevices(object sender, RoutedEventArgs e)
@@ -145,10 +186,21 @@ public partial class ChatsView : UserControl
         DropHintText.Text = _chat is { IsGroup: true }
             ? "Files go to one device at a time, not to a group."
             : $"Drop to send to {_chat?.PeerName}";
-        DropHint.Visibility = Visibility.Visible;
+        if (DropHint.Visibility != Visibility.Visible)
+        {
+            DropHint.Visibility = Visibility.Visible;
+            if (Environment.TickCount64 - _dropHiddenAt > DropReappearMs)
+            {
+                Motion.Appear(DropHint);
+            }
+        }
     }
 
-    private void OnDragLeave(object sender, DragEventArgs e) => DropHint.Visibility = Visibility.Collapsed;
+    private void OnDragLeave(object sender, DragEventArgs e)
+    {
+        DropHint.Visibility = Visibility.Collapsed;
+        _dropHiddenAt = Environment.TickCount64;
+    }
 
     private async void OnDrop(object sender, DragEventArgs e)
     {

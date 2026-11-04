@@ -1,4 +1,6 @@
-﻿using System.Globalization;
+﻿using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -141,6 +143,7 @@ public partial class App : Application
                 services.AddSingleton<AvatarCatalog>();
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainViewModel>();
+                services.AddSingleton<SoundService>();
                 services.AddSingleton<NotificationCenter>();
                 services.AddSingleton<MainWindow>();
             })
@@ -178,6 +181,7 @@ public partial class App : Application
             StartupRegistration.Apply(true);
         }
 
+        Motion.WatchButtons();
         var window = _host.Services.GetRequiredService<MainWindow>();
         MainWindow = window;
         StartTray(window, _host.Services);
@@ -250,7 +254,20 @@ public partial class App : Application
         _singleInstance = new Mutex(true, $@"Local\Roomie-{key}", out var isFirst);
         if (!isFirst)
         {
-            _showRequest.Set();
+            // Showing the other copy would look as if this version had opened, without what's new in it.
+            if (FindOtherRunningVersion() is { } other && other != AppVersion)
+            {
+                MessageBox.Show(
+                    $"Roomie {other} is already running, so this copy ({AppVersion}) can't open.\n\nRight-click the Roomie icon in the notification area, choose Exit Roomie, then open this copy again.",
+                    "Roomie",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            else
+            {
+                _showRequest.Set();
+            }
+
             _showRequest.Dispose();
             _showRequest = null;
             _singleInstance.Dispose();
@@ -258,6 +275,31 @@ public partial class App : Application
         }
 
         return isFirst;
+    }
+
+    /// <summary>The version of the other Roomie running, or null if it can't be told, in which case it's treated as the same.</summary>
+    private static string? FindOtherRunningVersion()
+    {
+        using var current = Process.GetCurrentProcess();
+        foreach (var process in Process.GetProcessesByName(current.ProcessName))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.Id != current.Id && process.MainModule?.FileVersionInfo.ProductVersion is { } version)
+                    {
+                        return version.Split('+')[0];
+                    }
+                }
+                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
+                {
+                    // It may have just exited, or it can't be read. Neither is worth a message.
+                }
+            }
+        }
+
+        return null;
     }
 
     private void ListenForShowRequests(MainWindow window)

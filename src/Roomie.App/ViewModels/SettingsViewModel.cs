@@ -7,6 +7,7 @@ using Roomie.App.Services;
 using Roomie.Core.Configuration;
 using Roomie.Core.Identity;
 using Roomie.Core.Profiles;
+using Roomie.Core.Sounds;
 using Roomie.Infrastructure.Profiles;
 using Roomie.Infrastructure.Storage;
 using Roomie.Network.Files;
@@ -27,9 +28,11 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly ProfileService _profiles;
     private readonly AvatarCatalog _avatars;
     private readonly ILocalIdentityProvider _identity;
+    private readonly SoundService _sounds;
 
-    public SettingsViewModel(JsonSettingsStore store, FileTransferService files, ThemeService theme, AppPaths paths, ProfileService profiles, AvatarCatalog avatars, ILocalIdentityProvider identity)
+    public SettingsViewModel(JsonSettingsStore store, FileTransferService files, ThemeService theme, AppPaths paths, ProfileService profiles, AvatarCatalog avatars, ILocalIdentityProvider identity, SoundService sounds)
     {
+        _sounds = sounds;
         _store = store;
         _files = files;
         _theme = theme;
@@ -47,6 +50,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _startWithWindows = current.StartWithWindows;
         _notifications = current.Notifications;
         _showMessageText = current.ShowMessageText;
+        _playSounds = current.Sounds;
         _receiveFolder = files.ReceiveFolder;
         _problem = store.LoadProblem is null ? null : "Your saved settings couldn't be read, so these are the defaults. Changing one replaces the old file.";
     }
@@ -91,6 +95,9 @@ public sealed partial class SettingsViewModel : ObservableObject
     private bool _showMessageText;
 
     [ObservableProperty]
+    private bool _playSounds;
+
+    [ObservableProperty]
     private string _receiveFolder;
 
     [ObservableProperty]
@@ -107,6 +114,19 @@ public sealed partial class SettingsViewModel : ObservableObject
     partial void OnNotificationsChanged(bool value) => Save(s => s with { Notifications = value });
 
     partial void OnShowMessageTextChanged(bool value) => Save(s => s with { ShowMessageText = value });
+
+    partial void OnPlaySoundsChanged(bool value)
+    {
+        Save(s => s with { Sounds = value });
+        if (value)
+        {
+            // So the user hears what they just turned on.
+            _sounds.Play(SoundEffect.Message);
+        }
+    }
+
+    [RelayCommand]
+    private void TestSound() => _sounds.PlayTest(SoundEffect.Message);
 
     partial void OnStartWithWindowsChanged(bool value)
     {
