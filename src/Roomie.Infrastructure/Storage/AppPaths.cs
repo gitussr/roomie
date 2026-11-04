@@ -18,6 +18,7 @@ public sealed class AppPaths
         Logs = Path.Combine(Root, "logs");
         Config = Path.Combine(Root, "config");
         Identity = Path.Combine(Root, "identity");
+        Avatars = Path.Combine(Root, "avatars");
     }
 
     public string Root { get; }
@@ -30,6 +31,9 @@ public sealed class AppPaths
     public string Logs { get; }
     public string Config { get; }
     public string Identity { get; }
+
+    /// <summary>The pictures of this device and paired ones.</summary>
+    public string Avatars { get; }
 
     public string DatabaseFile => Path.Combine(Database, "messenger.db");
     public string SettingsFile => Path.Combine(Config, "settings.json");
@@ -46,7 +50,7 @@ public sealed class AppPaths
 
     public void EnsureCreated()
     {
-        foreach (var directory in new[] { Database, Downloads, Attachments, Incoming, Logs, Config, Identity })
+        foreach (var directory in new[] { Database, Downloads, Attachments, Incoming, Logs, Config, Identity, Avatars })
         {
             Directory.CreateDirectory(directory);
         }

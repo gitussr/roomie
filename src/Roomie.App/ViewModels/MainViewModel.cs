@@ -14,12 +14,14 @@ using Roomie.Core.Messaging;
 using Roomie.Core.Notifications;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
+using Roomie.Infrastructure.Storage;
 using Roomie.Network.Connections;
 using Roomie.Network.Discovery;
 using Roomie.Network.Files;
 using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
+using Roomie.Network.Profiles;
 
 namespace Roomie.App.ViewModels;
 
@@ -46,7 +48,8 @@ public sealed record NearbyDevice(
     bool CanPair,
     bool CanForget,
     bool CanUnblock,
-    bool CanChat = false);
+    bool CanChat = false,
+    AvatarVisual? Avatar = null);
 
 /// <summary>A row in the list of conversations: a paired device or a group.</summary>
 public sealed record ConversationItem(
@@ -58,7 +61,8 @@ public sealed record ConversationItem(
     int Unread,
     bool IsOnline,
     bool IsOpen,
-    DateTimeOffset LastActivity)
+    DateTimeOffset LastActivity,
+    AvatarVisual Avatar)
 {
     public bool IsGroup => GroupId is not null;
 
@@ -69,10 +73,6 @@ public sealed record ConversationItem(
     /// <summary>Spelled out because a coloured dot alone tells a screen reader, or someone who can't see the colour, nothing.</summary>
     public string Description =>
         $"{Name}, {(IsGroup ? "group" : IsOnline ? "online" : "offline")}{(HasUnread ? $", {Unread} unread" : string.Empty)}";
-
-    public string Initial => new StringInfo(Name).LengthInTextElements > 0
-        ? new StringInfo(Name).SubstringByTextElements(0, 1).ToUpper(CultureInfo.CurrentCulture)
-        : "?";
 }
 
 /// <summary>An invitation waiting for this user's answer.</summary>
@@ -92,6 +92,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly FileTransferService _files;
     private readonly ITrustStore _trust;
     private readonly IMessageStore _messages;
+    private readonly AvatarCatalog _avatars;
     private readonly SynchronizationContext _ui;
     private int _refreshQueued;
 
@@ -106,14 +107,18 @@ public sealed partial class MainViewModel : ObservableObject
         FileTransferService files,
         IMessageStore messages,
         ITrustStore trust,
-        SettingsViewModel settings)
+        SettingsViewModel settings,
+        AvatarCatalog avatars,
+        ProfileService profiles,
+        JsonSettingsStore appSettings)
     {
         ArgumentNullException.ThrowIfNull(messaging);
         _messages = messages;
         _groups = groups;
         _files = files;
         Settings = settings;
-        Chat = new ChatViewModel(messaging, groups, files, messages, trust, identityStore);
+        _avatars = avatars;
+        Chat = new ChatViewModel(messaging, groups, files, messages, trust, identityStore, avatars);
         Chat.FilesChanged += (_, _) => RefreshTransfers();
 
         _identityStore = identityStore;
@@ -135,6 +140,18 @@ public sealed partial class MainViewModel : ObservableObject
         _username = identity.Username;
         _usernameDraft = identity.Username;
 
+        Welcome = new WelcomeViewModel(appSettings, TryRename, OpenChat);
+        var pairedDevices = trust.TrustedPeers.Count;
+        if (appSettings.Current.NeedsWelcome(pairedDevices))
+        {
+            Welcome.Show(identity.Username, trust.TrustedPeers);
+        }
+        else if (!appSettings.Current.HasSeenWelcome)
+        {
+            // Updated from before the welcome existed. Forgetting every device later mustn't bring it up.
+            appSettings.Update(s => s with { HasSeenWelcome = true });
+        }
+
         registry.Changed += (_, _) => QueueRefresh();
         discovery.StatusChanged += (_, _) => QueueRefresh();
         connections.Changed += (_, _) => QueueRefresh();
@@ -145,6 +162,7 @@ public sealed partial class MainViewModel : ObservableObject
         groups.Changed += (_, _) => QueueRefresh();
         groups.IncomingInvite += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
         files.Changed += (_, _) => QueueRefresh();
+        profiles.Changed += (_, _) => QueueRefresh();
         files.IncomingOffer += (_, _) => _ui.Post(_ => AttentionRequested?.Invoke(this, EventArgs.Empty), null);
 
         // Only the file lists: rebuilding the device list this often would make its buttons hard to click.
@@ -160,6 +178,8 @@ public sealed partial class MainViewModel : ObservableObject
     public event EventHandler? AttentionRequested;
 
     public PairingViewModel Pairing { get; }
+
+    public WelcomeViewModel Welcome { get; }
 
     public ChatViewModel Chat { get; }
 
@@ -253,19 +273,32 @@ public sealed partial class MainViewModel : ObservableObject
     private bool CanSaveUsername() => UsernameDraft.Trim() != Username;
 
     [RelayCommand(CanExecute = nameof(CanSaveUsername))]
-    private void SaveUsername()
+    private void SaveUsername() => UsernameError = TryRename(UsernameDraft);
+
+    /// <returns>What's wrong with the name, or null once this computer has it.</returns>
+    private string? TryRename(string name)
     {
-        if (!Core.Identity.Username.TryNormalize(UsernameDraft, out var normalized, out var error))
+        if (!Core.Identity.Username.TryNormalize(name, out var normalized, out var error))
         {
-            UsernameError = error;
-            return;
+            return error;
         }
 
         Username = _identityStore.ChangeUsername(normalized).Username;
         UsernameDraft = Username;
         UsernameError = null;
+        Settings.RefreshOwnAvatar();
         SaveUsernameCommand.NotifyCanExecuteChanged();
         _discovery.AnnounceNow();
+        return null;
+    }
+
+    /// <summary>Goes through the welcome again. A conversation left open would count as read behind it, so that closes.</summary>
+    [RelayCommand]
+    private void ShowWelcome()
+    {
+        CloseChat();
+        Welcome.Show(Username, _trust.TrustedPeers);
+        Refresh();
     }
 
     [RelayCommand]
@@ -384,6 +417,7 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        Welcome.Dismiss();
         if (target.ShowTransfers)
         {
             Section = AppSection.Transfers;
@@ -488,7 +522,13 @@ public sealed partial class MainViewModel : ObservableObject
                 ConnectionOf(peer.DeviceId), isTrusted: true, isBlocked: false, pairingBusy));
         }
 
-        SyncInPlace(NearbyDevices, devices.Select(d => d with { CanChat = d.CanForget }).ToList());
+        // Only a paired device can have sent a picture, and only then is its name more than a claim.
+        SyncInPlace(NearbyDevices, devices.Select(d => d with
+        {
+            CanChat = d.CanForget,
+            Avatar = d.CanForget ? _avatars.For(d.DeviceId, d.Username) : AvatarCatalog.Letter(d.Username),
+        }).ToList());
+        Welcome.Update(NearbyDevices, trusted.Values);
 
         var status = _discovery.Status;
         Status = status.State switch
@@ -556,7 +596,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         return new ConversationItem(peer.DeviceId, null, peer.Username, PreviewOf(last, null) ?? "No messages yet",
-            TimeOf(last), unread, isOnline, Chat.PeerId == peer.DeviceId, last?.Timestamp ?? DateTimeOffset.MinValue);
+            TimeOf(last), unread, isOnline, Chat.PeerId == peer.DeviceId, last?.Timestamp ?? DateTimeOffset.MinValue, _avatars.For(peer.DeviceId, peer.Username));
     }
 
     /// <returns>The unread messages across all groups.</returns>
@@ -594,7 +634,7 @@ public sealed partial class MainViewModel : ObservableObject
                 : "You were removed";
             conversations.Add(new ConversationItem(null, group.State.GroupId, group.State.Name, PreviewOf(last, group.State) ?? details,
                 TimeOf(last), unread.GetValueOrDefault(group.State.GroupId), false, Chat.GroupId == group.State.GroupId,
-                last?.Timestamp ?? DateTimeOffset.MinValue));
+                last?.Timestamp ?? DateTimeOffset.MinValue, AvatarCatalog.Letter(group.State.Name)));
         }
 
         var open = new List<GroupInviteItem>();

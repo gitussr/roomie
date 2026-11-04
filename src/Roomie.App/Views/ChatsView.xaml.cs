@@ -2,22 +2,37 @@ using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
+using Roomie.App.Services;
 using Roomie.App.ViewModels;
 
 namespace Roomie.App.Views;
 
 public partial class ChatsView : UserControl
 {
+    private const long EmojiReopenDelayMs = 250;
+
     private ChatViewModel? _chat;
+    private long _emojiClosedAt = -EmojiReopenDelayMs - 1;
 
     public ChatsView()
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
         CommandManager.AddPreviewExecutedHandler(Composer, OnComposerCommand);
+        EmojiList.ItemsSource = EmojiCatalog.All;
     }
 
     private MainViewModel? Main => DataContext as MainViewModel;
+
+    /// <summary>Puts the cursor in the message box, if a conversation is open.</summary>
+    public void FocusComposer()
+    {
+        if (_chat is { IsOpen: true })
+        {
+            Composer.Focus();
+        }
+    }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
@@ -47,6 +62,45 @@ public partial class ChatsView : UserControl
         {
             main.Section = AppSection.Devices;
         }
+    }
+
+    private void OnEmojiButton(object sender, RoutedEventArgs e)
+    {
+        // A click on this button while the list is open has just closed it, and shouldn't open it straight back up.
+        if (Environment.TickCount64 - _emojiClosedAt > EmojiReopenDelayMs)
+        {
+            EmojiPopup.IsOpen = true;
+        }
+    }
+
+    private void OnEmojiOpened(object? sender, EventArgs e) =>
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, () => EmojiList.MoveFocus(new TraversalRequest(FocusNavigationDirection.First)));
+
+    private void OnEmojiClosed(object? sender, EventArgs e) => _emojiClosedAt = Environment.TickCount64;
+
+    private void OnEmojiKey(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            EmojiPopup.IsOpen = false;
+            Composer.Focus();
+        }
+    }
+
+    /// <summary>Goes where the cursor is, replacing any selected text, as typing it would.</summary>
+    private void OnEmojiChosen(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not EmojiOption emoji)
+        {
+            return;
+        }
+
+        EmojiPopup.IsOpen = false;
+        var at = Composer.SelectionStart;
+        Composer.SelectedText = emoji.Glyph;
+        Composer.Select(at + emoji.Glyph.Length, 0);
+        Composer.Focus();
     }
 
     /// <summary>Files on the clipboard are sent, as when dragged here. Pasting text works as usual.</summary>

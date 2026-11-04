@@ -23,6 +23,17 @@
     </Window.TaskbarItemInfo>
 
     <Grid>
+    <!-- The app itself. Hidden and not just covered during the welcome, so a screen reader doesn't read it out behind it. -->
+    <Grid>
+        <Grid.Style>
+            <Style TargetType="Grid">
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding Welcome.IsVisible}" Value="True">
+                        <Setter Property="Visibility" Value="Hidden" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Grid.Style>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="82" />
             <ColumnDefinition Width="*" />
@@ -83,16 +94,10 @@
         </Border>
 
         <!-- Screens. They stay loaded, so a draft or a scroll position survives moving between them. -->
-        <views:ChatsView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Chats}" />
+        <views:ChatsView x:Name="Chats" Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Chats}" />
         <views:DevicesView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Devices}" />
         <views:TransfersView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Transfers}" />
         <views:SettingsView Grid.Column="1" Visibility="{Binding Section, Converter={StaticResource SectionVisible}, ConverterParameter=Settings}" />
-
-        <!-- Pairing covers every screen: it has a time limit and needs an answer. -->
-        <Border Grid.Column="1" Background="{DynamicResource ScrimBrush}"
-                Visibility="{Binding Pairing.IsVisible, Converter={StaticResource BoolToVisibility}}">
-            <views:PairingView DataContext="{Binding Pairing}" />
-        </Border>
 
         <Border Grid.Column="1" Grid.Row="1" Padding="14,5" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0">
             <DockPanel>
@@ -100,5 +105,20 @@
                 <TextBlock Text="{Binding Status}" Style="{StaticResource MutedText}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
             </DockPanel>
         </Border>
+    </Grid>
+
+        <!-- The first-run walkthrough has the whole window until it's finished or skipped. -->
+        <views:WelcomeView x:Name="Welcome"
+                           Visibility="{Binding Welcome.IsVisible, Converter={StaticResource BoolToVisibility}}" />
+
+        <!-- Pairing covers everything else, the welcome too: it has a time limit and needs an answer. -->
+        <Border x:Name="PairingCover" Background="{DynamicResource ScrimBrush}"
+                Focusable="True" FocusVisualStyle="{x:Null}" KeyboardNavigation.TabNavigation="Cycle"
+                Visibility="{Binding Pairing.IsVisible, Converter={StaticResource BoolToVisibility}}">
+            <views:PairingView DataContext="{Binding Pairing}" />
+        </Border>
+
+        <!-- Over everything, and only when Roomie opens. -->
+        <views:SplashView x:Name="Splash" />
     </Grid>
 </Window>

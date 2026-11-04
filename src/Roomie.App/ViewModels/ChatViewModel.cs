@@ -5,6 +5,7 @@ using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
+using Roomie.App.Services;
 using Roomie.Core.Files;
 using Roomie.Core.Groups;
 using Roomie.Core.Identity;
@@ -26,7 +27,7 @@ public sealed record GroupMemberItem(Guid DeviceId, string Name, string Status, 
 public sealed record GroupInviteCandidate(Guid DeviceId, string Name);
 
 /// <summary>The open conversation, with one device or a group. The whole list is rebuilt from the store on every change.</summary>
-public sealed partial class ChatViewModel(MessagingService messaging, GroupService groups, FileTransferService files, IMessageStore store, ITrustStore trust, ILocalIdentityProvider identity) : ObservableObject
+public sealed partial class ChatViewModel(MessagingService messaging, GroupService groups, FileTransferService files, IMessageStore store, ITrustStore trust, ILocalIdentityProvider identity, AvatarCatalog avatars) : ObservableObject
 {
     /// <summary>The panel creates a control per message, so a long history can't all be shown until it can page.</summary>
     public const int MaxShownMessages = 500;
@@ -78,6 +79,9 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
 
     [ObservableProperty]
     private string _membersTitle = string.Empty;
+
+    [ObservableProperty]
+    private AvatarVisual? _peerAvatar;
 
     [ObservableProperty]
     private string _peerName = string.Empty;
@@ -149,6 +153,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
 
         var peer = trust.FindTrusted(peerId);
         PeerName = peer?.Username ?? DeviceIdFormat.ToDisplayId(peerId);
+        PeerAvatar = avatars.For(peerId, PeerName);
         PeerDisplayId = DeviceIdFormat.ToDisplayId(peerId);
         Connection = connection;
         CanCompose = peer is not null && !trust.IsBlocked(peerId);
@@ -326,6 +331,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         var state = group.State;
         var isOwner = state.OwnerId == self && group.IsMember;
         PeerName = state.Name;
+        PeerAvatar = AvatarCatalog.Letter(state.Name);
         PeerDisplayId = "Group";
         Connection = group.IsMember
             ? $"{state.Members.Count} {(state.Members.Count == 1 ? "member" : "members")} · owner {NameOf(state, state.OwnerId)}"

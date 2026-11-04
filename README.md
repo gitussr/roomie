@@ -15,7 +15,34 @@ Roomie is a peer-to-peer LAN messenger for Windows. It needs no server, internet
 - **Phase 8 (groups), done.** Type a name under **Groups** and choose **New group**, then open **Members** to invite paired devices. An invited device joins only if its user chooses **Join**. Each member's copy of a message is delivered and tracked separately, so one offline member holds nobody else up. Only the owner can add or remove members, and every change is signed with the owner's device key, so any member can pass it on but none can forge it. Being in a group creates no trust: a member you haven't paired with gets your messages only once you pair. A removed device keeps its history but can't send. There is no leaving a group or changing its owner in this version. The rules are in architecture.md §7.
 - **Phase 9 (file transfer), done.** Open a chat with a paired device and choose **Send file…**, up to 100 GB. The other side chooses **Accept** or **Decline**, and nothing is saved before that. Files arrive in the folder chosen in Settings, only after their SHA-256 matches, and never overwrite anything. Roomie never opens a received file: it offers **Show in folder**, and marks the file so that Windows warns before running it. An interrupted transfer pauses, and continues by itself from where it stopped when the devices next connect, even after closing Roomie or a power cut. Files go to one device at a time, not to a group. The rules are in architecture.md §8.
 - **Phase 10 (Windows interface), done.** Roomie now has **Chats**, **Devices**, **Transfers** and **Settings** screens, light and dark themes that can follow Windows, and an icon in the notification area. Closing the window leaves Roomie running so messages and files keep arriving, and it can start when you sign in. Windows notifications announce messages, files and pairing requests, and the taskbar button flashes and shows a count and a transfer's progress. Files can be dragged onto a conversation or pasted into it. Received files now go to your Windows Downloads folder by default, or any folder you choose, and an unfinished file is kept on that same drive. Opening Roomie a second time shows the one already running. The rules are in architecture.md §8 and §15.
-- **Next: Phase 11,** security and network testing and the MSIX release.
+- **Profile pictures and logo reveal (0.11.0).** In **Settings**, choose one of 12 built-in avatars or upload your own picture. Paired devices see it in their chats and device list. Roomie opens with a short animated logo reveal, which any click or key skips. It doesn't play when Roomie starts by itself at sign-in or when the window comes back from the notification area, or if animations are off in Windows. Details are in architecture.md §15.
+- **First-run welcome and emoji (0.12.0).** A new install walks you through naming the computer and pairing with another, and any step can be skipped. Someone updating with a paired device doesn't see it, and **Settings** > **About** can show it again. The **😀** button by the message box adds an emoji where the cursor is. Windows 10's `Win`+`.` panel works there too. Emoji are ordinary text, so older versions of Roomie receive them as usual.
+- **Next: sounds and small animations,** then Phase 11, security and network testing and the MSIX release.
+
+### Testing the welcome and emoji on two PCs
+
+Run 0.12.0 on both PCs. The welcome needs a computer with nothing paired: use a PC that has never run Roomie, or a new Windows account. On a PC that already has paired devices, use **Settings** > **About** > **Show the welcome again** instead, after choosing **Forget…** for the device you pair with in step 3.
+
+1. Open Roomie on a new PC: after the logo, the welcome should ask for a name, with the cursor in the box. Clear the box and choose **Continue**: it should explain the problem and stay there.
+2. Enter a name and press Enter. Step 2 should list the other computer within a few seconds, or say what's wrong if it can't find any. Allow Roomie if Windows Firewall asks.
+3. Choose **Pair…** and compare the codes as usual. After **Close**, it should say you're paired, and **Start chatting** should open that conversation with the cursor ready to type.
+4. Start again on a new PC, and this time start the pairing from the **other** computer, while the welcome is still on its first step. The code should appear over the welcome, Tab should reach its buttons, and pairing should finish the welcome.
+5. Close Roomie part-way through the welcome and reopen it: it should start again. Then choose **Skip for now** and reopen: it shouldn't return.
+6. Update a PC that already has paired devices: no welcome should appear, even after forgetting them all.
+7. In a chat, choose the **😀** button and pick an emoji: it should go in at the cursor and the cursor should stay in the message box. Press Esc with the list open: it should close. Click the button again with the list open: it should close and stay closed.
+8. Send emoji both ways, including to a group and with `Win`+`.`. They should show on both PCs, in the chat, the conversation list and a notification. WPF draws them in one colour.
+
+### Testing profile pictures and the logo reveal on two PCs
+
+Run 0.11.0 on both PCs. A PC still on 0.10.0 keeps working with it, but neither sees the other's picture.
+
+1. Open Roomie: the logo should appear through a growing circle, then the name and a line of text, then fade into the app within about 2 seconds. Open it again and click at once: it should skip.
+2. In **Settings** on PC A, choose a built-in avatar. PC B should show it within a moment, in **Chats**, at the top of the open chat and in **Devices**.
+3. Choose **Upload picture…** and pick a phone photo, ideally one taken in portrait. It should be upright and cropped to the centre, on both PCs.
+4. Try a file that isn't a picture, such as a text file renamed to `.jpg`: it should explain the problem and keep your current picture.
+5. Choose **Remove picture**: both PCs should go back to the first letter of the name.
+6. Change the picture with PC B closed, then open B: it should show the new one after connecting.
+7. Choose **Forget…** for a device: its picture should go, and the file should be gone from `avatars` in Roomie's data folder.
 
 ### Testing the Windows interface on two PCs
 

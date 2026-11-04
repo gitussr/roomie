@@ -1,0 +1,101 @@
+<UserControl x:Class="Roomie.App.Views.WelcomeView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Roomie.App.ViewModels"
+             xmlns:views="clr-namespace:Roomie.App.Views"
+             Background="{DynamicResource WindowBrush}"
+             KeyboardNavigation.TabNavigation="Cycle"
+             KeyboardNavigation.DirectionalNavigation="Contained"
+             AutomationProperties.Name="Welcome to Roomie">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+        <Grid MaxWidth="500" Margin="24" VerticalAlignment="Center" HorizontalAlignment="Center">
+
+            <!-- Step 1: the name -->
+            <StackPanel Visibility="{Binding Welcome.IsNameStep, Converter={StaticResource BoolToVisibility}}">
+                <Image Source="/Assets/roomie.png" Width="88" Height="88" HorizontalAlignment="Center" AutomationProperties.Name="Roomie logo" />
+                <TextBlock Margin="0,14,0,0" Text="Welcome to Roomie" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                <TextBlock Margin="0,6,0,0" Style="{StaticResource MutedText}" FontSize="13" TextAlignment="Center"
+                           Text="Chat and send files between computers on your own network. Nothing goes through the internet." />
+
+                <TextBlock Margin="0,26,0,2" Text="Step 1 of 2" Style="{StaticResource MutedText}" />
+                <TextBlock Text="What should this computer be called?" Style="{StaticResource SectionText}" />
+                <TextBlock Margin="0,2,0,8" Style="{StaticResource MutedText}" Text="Other computers on this network see this name, so pick one you'll recognise." />
+                <TextBox x:Name="NameBox" Text="{Binding Welcome.NameDraft, UpdateSourceTrigger=PropertyChanged}" MaxLength="32" AutomationProperties.Name="Name of this computer">
+                    <TextBox.InputBindings>
+                        <KeyBinding Key="Enter" Command="{Binding Welcome.ContinueToPairingCommand}" />
+                    </TextBox.InputBindings>
+                </TextBox>
+                <TextBlock Margin="0,4,0,0" Text="{Binding Welcome.NameError}" Style="{StaticResource ProblemText}" />
+
+                <DockPanel Margin="0,18,0,0" LastChildFill="False">
+                    <Button DockPanel.Dock="Right" Padding="18,6" Content="Continue" Style="{StaticResource PrimaryButton}" Command="{Binding Welcome.ContinueToPairingCommand}" />
+                    <Button DockPanel.Dock="Left" Padding="14,6" Content="Skip for now" Command="{Binding Welcome.FinishCommand}" AutomationProperties.Name="Skip the welcome" />
+                </DockPanel>
+            </StackPanel>
+
+            <!-- Step 2: pairing -->
+            <StackPanel x:Name="PairStep" Focusable="True" FocusVisualStyle="{x:Null}"
+                        Visibility="{Binding Welcome.IsPairStep, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="Step 2 of 2" Style="{StaticResource MutedText}" />
+                <TextBlock Margin="0,2,0,0" Text="Pair with another computer" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap" />
+                <TextBlock Margin="0,6,0,0" TextWrapping="Wrap"
+                           Text="Open Roomie on the other computer too, on the same network. Choose it below, then check that both screens show the same code." />
+                <TextBlock Margin="0,6,0,0" Style="{StaticResource MutedText}"
+                           Text="If Windows asks about Roomie and the firewall, allow it on private networks. Names aren't verified until you pair, so only pair with a computer you can see or ask about." />
+                <TextBlock Margin="0,10,0,0" Text="{Binding DiscoveryProblem}" Style="{StaticResource ProblemText}" />
+
+                <Border Margin="0,14,0,0" Padding="14,12" CornerRadius="6" Background="{DynamicResource SubtleBrush}"
+                        Visibility="{Binding Welcome.HasNoDevices, Converter={StaticResource BoolToVisibility}}">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Status}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <TextBlock Margin="0,3,0,0" Text="{Binding EmptyListHint}" Style="{StaticResource MutedWhenEmpty}" />
+                    </StackPanel>
+                </Border>
+
+                <ItemsControl Margin="0,14,0,0" ItemsSource="{Binding Welcome.Devices}" Focusable="False" AutomationProperties.Name="Computers you can pair with">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:NearbyDevice}">
+                            <Border Margin="0,0,0,8" Padding="12,10" CornerRadius="6" Background="{DynamicResource SubtleBrush}">
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Right" Margin="10,0,0,0" VerticalAlignment="Center" Padding="14,4" Content="Pair…"
+                                            Style="{StaticResource PrimaryButton}"
+                                            Command="{Binding DataContext.PairCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding DeviceId}"
+                                            Visibility="{Binding CanPair, Converter={StaticResource BoolToVisibility}}"
+                                            AutomationProperties.Name="{Binding Username, StringFormat='Pair with {0}'}" />
+                                    <views:AvatarView DockPanel.Dock="Left" Width="38" Height="38" Margin="0,0,12,0" VerticalAlignment="Center" Avatar="{Binding Avatar}" />
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Username}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Style="{StaticResource MutedText}" FontFamily="Consolas" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                                            <Run Text="{Binding DisplayId, Mode=OneWay}" />
+                                            <Run Text="·" />
+                                            <Run Text="{Binding Address, Mode=OneWay}" />
+                                        </TextBlock>
+                                        <TextBlock Text="{Binding Problem}" FontSize="12" Style="{StaticResource ProblemText}" />
+                                    </StackPanel>
+                                </DockPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <DockPanel Margin="0,10,0,0" LastChildFill="False">
+                    <Button DockPanel.Dock="Right" Padding="14,6" Content="Do this later" Command="{Binding Welcome.FinishCommand}" />
+                    <Button DockPanel.Dock="Left" Padding="14,6" Content="Back" Command="{Binding Welcome.BackToNameCommand}" />
+                </DockPanel>
+                <TextBlock Margin="0,10,0,0" Style="{StaticResource MutedText}" Text="You can pair at any time under Devices." />
+            </StackPanel>
+
+            <!-- Done -->
+            <StackPanel Visibility="{Binding Welcome.IsDoneStep, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="44" HorizontalAlignment="Center" Foreground="{DynamicResource SuccessBrush}" AutomationProperties.Name="Done" />
+                <TextBlock Margin="0,12,0,0" FontSize="24" FontWeight="SemiBold" TextWrapping="Wrap" TextAlignment="Center"
+                           Text="{Binding Welcome.PairedName, StringFormat='You\'re paired with {0}'}" />
+                <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" TextAlignment="Center"
+                           Text="You can chat and send files now. Your name and profile picture can be changed in Settings." />
+                <Button x:Name="StartButton" Margin="0,20,0,0" HorizontalAlignment="Center" Padding="18,6" Content="Start chatting"
+                        Style="{StaticResource PrimaryButton}" Command="{Binding Welcome.StartChattingCommand}" />
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

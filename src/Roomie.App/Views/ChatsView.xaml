@@ -1,7 +1,9 @@
 <UserControl x:Class="Roomie.App.Views.ChatsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:vm="clr-namespace:Roomie.App.ViewModels">
+             xmlns:vm="clr-namespace:Roomie.App.ViewModels"
+             xmlns:services="clr-namespace:Roomie.App.Services"
+             xmlns:views="clr-namespace:Roomie.App.Views">
     <Grid>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="300" MinWidth="220" MaxWidth="460" />
@@ -70,8 +72,7 @@
                                     <DockPanel>
                                         <!-- The initial, with a dot when a device is connected. -->
                                         <Grid DockPanel.Dock="Left" Width="38" Height="38" Margin="0,0,10,0" VerticalAlignment="Top">
-                                            <Ellipse Fill="{DynamicResource HoverBrush}" />
-                                            <TextBlock Text="{Binding Initial}" FontSize="15" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            <views:AvatarView Avatar="{Binding Avatar}" />
                                             <TextBlock Text="&#xE716;" FontFamily="Segoe MDL2 Assets" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                                        Visibility="{Binding IsGroup, Converter={StaticResource BoolToVisibility}}" />
                                             <Grid HorizontalAlignment="Right" VerticalAlignment="Bottom" Visibility="{Binding IsDevice, Converter={StaticResource BoolToVisibility}}">
@@ -130,6 +131,7 @@
                     <DockPanel>
                         <Button DockPanel.Dock="Right" VerticalAlignment="Center" Padding="10,3" Content="Close"
                                 Command="{Binding CloseChatCommand}" AutomationProperties.Name="Close conversation" />
+                        <views:AvatarView DockPanel.Dock="Left" Width="40" Height="40" Margin="0,0,12,0" VerticalAlignment="Center" Avatar="{Binding Chat.PeerAvatar}" />
                         <StackPanel>
                             <TextBlock Text="{Binding Chat.PeerName}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                             <TextBlock Style="{StaticResource MutedText}">
@@ -214,6 +216,33 @@
                                     </Style>
                                 </Button.Style>
                             </Button>
+                            <Button x:Name="EmojiButton" DockPanel.Dock="Right" Margin="8,0,0,0" Padding="9,5" VerticalAlignment="Bottom"
+                                    IsEnabled="{Binding Chat.CanCompose}" Click="OnEmojiButton" ToolTip="Add an emoji"
+                                    AutomationProperties.Name="Add an emoji">
+                                <TextBlock Text="😀" FontFamily="Segoe UI Emoji" FontSize="15" />
+                            </Button>
+                            <Popup x:Name="EmojiPopup" DockPanel.Dock="Right" PlacementTarget="{Binding ElementName=EmojiButton}" Placement="Top"
+                                   HorizontalOffset="-300" VerticalOffset="-6" StaysOpen="False" AllowsTransparency="True"
+                                   Opened="OnEmojiOpened" Closed="OnEmojiClosed">
+                                <Border Padding="6" CornerRadius="6" Background="{DynamicResource RaisedBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
+                                        KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Cycle" PreviewKeyDown="OnEmojiKey">
+                                    <ItemsControl x:Name="EmojiList" Width="344" Focusable="False" AutomationProperties.Name="Emoji">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate DataType="{x:Type services:EmojiOption}">
+                                                <Button Width="43" Height="40" Padding="0" Style="{StaticResource RowButton}" HorizontalContentAlignment="Center"
+                                                        Click="OnEmojiChosen" ToolTip="{Binding Name}" AutomationProperties.Name="{Binding Name}">
+                                                    <TextBlock Text="{Binding Glyph}" FontFamily="Segoe UI Emoji" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,6,0,0" />
+                                                </Button>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Border>
+                            </Popup>
                             <TextBox x:Name="Composer" Text="{Binding Chat.Draft, UpdateSourceTrigger=PropertyChanged}"
                                      IsEnabled="{Binding Chat.CanCompose}" AcceptsReturn="True" TextWrapping="Wrap"
                                      MaxHeight="120" MinHeight="32" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Message">

@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -6,6 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shell;
+using System.Windows.Threading;
 using Roomie.App.Services;
 using Roomie.App.ViewModels;
 using Roomie.Infrastructure.Storage;
@@ -32,6 +33,22 @@ public partial class MainWindow : Window
 
         viewModel.AttentionRequested += (_, _) => RequestAttention();
         viewModel.PropertyChanged += OnViewModelChanged;
+        Splash.Finished += (_, _) => FocusWelcome();
+        viewModel.Pairing.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(PairingViewModel.IsVisible))
+            {
+                FocusWelcome();
+            }
+        };
+        viewModel.Welcome.PropertyChanged += (_, e) =>
+        {
+            // "Start chatting" should leave the cursor ready to type.
+            if (e.PropertyName == nameof(WelcomeViewModel.IsVisible) && !viewModel.Welcome.IsVisible)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, Chats.FocusComposer);
+            }
+        };
         theme.Changed += (_, _) => theme.ApplyTitleBar(this);
         SourceInitialized += (_, _) => theme.ApplyTitleBar(this);
         Activated += (_, _) => viewModel.OnWindowActiveChanged(true);
@@ -50,6 +67,12 @@ public partial class MainWindow : Window
 
     /// <summary>The window was closed to the notification area for the first time, so the user should be told.</summary>
     public event EventHandler? HiddenToTrayFirstTime;
+
+    public void PlaySplash()
+    {
+        Splash.Prepare();
+        ContentRendered += (_, _) => Splash.Play();
+    }
 
     public void ShowFromTray()
     {
@@ -105,6 +128,27 @@ public partial class MainWindow : Window
     {
         base.OnClosed(e);
         Application.Current.Shutdown();
+    }
+
+    /// <summary>
+    /// The welcome keeps Tab to itself, so the keyboard has to be moved on to pairing and back again. Onto the panel and
+    /// not its buttons: a request can arrive mid-keystroke, and that key mustn't answer it.
+    /// </summary>
+    private void FocusWelcome()
+    {
+        if (!_viewModel.Welcome.IsVisible)
+        {
+            return;
+        }
+
+        if (_viewModel.Pairing.IsVisible)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, () => PairingCover.Focus());
+        }
+        else
+        {
+            Welcome.FocusStep();
+        }
     }
 
     /// <summary>

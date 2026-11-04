@@ -82,6 +82,9 @@ public sealed partial class ConnectionManager : BackgroundService
     /// <summary>Raised when a session becomes the active session for its device.</summary>
     public event EventHandler<PeerSession>? SessionOpened;
 
+    /// <summary>Raised when a live session becomes trusted, because pairing finished on it.</summary>
+    public event EventHandler<PeerSession>? SessionTrusted;
+
     /// <summary>Where services register for the message types they own. Register before the host starts.</summary>
     public RmpDispatcher Dispatcher { get; }
 
@@ -171,6 +174,7 @@ public sealed partial class ConnectionManager : BackgroundService
 
         LogSessionTrusted(_logger, session.RemoteDeviceId);
         RaiseChanged();
+        SessionTrusted?.Invoke(this, session);
     }
 
     /// <summary>

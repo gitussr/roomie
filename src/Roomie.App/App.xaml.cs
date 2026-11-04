@@ -18,9 +18,11 @@ using Roomie.Core.Groups;
 using Roomie.Core.Identity;
 using Roomie.Core.Messaging;
 using Roomie.Core.Protocol;
+using Roomie.Core.Profiles;
 using Roomie.Core.Trust;
 using Roomie.Infrastructure.Identity;
 using Roomie.Infrastructure.Messaging;
+using Roomie.Infrastructure.Profiles;
 using Roomie.Infrastructure.Storage;
 using Roomie.Infrastructure.Trust;
 using Roomie.Network.Connections;
@@ -29,6 +31,7 @@ using Roomie.Network.Files;
 using Roomie.Network.Groups;
 using Roomie.Network.Messaging;
 using Roomie.Network.Pairing;
+using Roomie.Network.Profiles;
 using Serilog;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
@@ -113,7 +116,7 @@ public partial class App : Application
                 services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<IDeviceSigner>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<ITrustStore>(trust);
-                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.FileTransfer] });
+                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.FileTransfer, RmpCapabilities.Profile] });
                 services.AddSingleton<ConnectionManager>();
                 services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
 
@@ -133,6 +136,9 @@ public partial class App : Application
                 services.AddSingleton<FileTransferService>();
                 services.AddHostedService(sp => sp.GetRequiredService<FileTransferService>());
 
+                services.AddSingleton<IAvatarStore>(_ => new FileAvatarStore(paths.Avatars));
+                services.AddSingleton<ProfileService>();
+                services.AddSingleton<AvatarCatalog>();
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<NotificationCenter>();
@@ -162,6 +168,7 @@ public partial class App : Application
         _host.Services.GetRequiredService<PairingService>();
         _host.Services.GetRequiredService<MessagingService>();
         _host.Services.GetRequiredService<FileTransferService>();
+        _host.Services.GetRequiredService<ProfileService>();
 
         await _host.StartAsync();
 
@@ -179,6 +186,7 @@ public partial class App : Application
         // Started by Windows at sign-in: stay in the notification area until wanted.
         if (!e.Args.Contains(StartupRegistration.BackgroundArgument))
         {
+            window.PlaySplash();
             window.Show();
         }
     }

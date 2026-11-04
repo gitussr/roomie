@@ -5,25 +5,39 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
 using Roomie.App.Services;
 using Roomie.Core.Configuration;
+using Roomie.Core.Identity;
+using Roomie.Core.Profiles;
+using Roomie.Infrastructure.Profiles;
 using Roomie.Infrastructure.Storage;
 using Roomie.Network.Files;
+using Roomie.Network.Profiles;
 
 namespace Roomie.App.ViewModels;
 
 /// <summary>The Settings screen. Every change takes effect and is saved at once.</summary>
+/// <summary>A built-in avatar to choose from.</summary>
+public sealed record AvatarOption(int Id, string Name, AvatarVisual Visual, bool IsSelected);
+
 public sealed partial class SettingsViewModel : ObservableObject
 {
     private readonly JsonSettingsStore _store;
     private readonly FileTransferService _files;
     private readonly ThemeService _theme;
     private readonly AppPaths _paths;
+    private readonly ProfileService _profiles;
+    private readonly AvatarCatalog _avatars;
+    private readonly ILocalIdentityProvider _identity;
 
-    public SettingsViewModel(JsonSettingsStore store, FileTransferService files, ThemeService theme, AppPaths paths)
+    public SettingsViewModel(JsonSettingsStore store, FileTransferService files, ThemeService theme, AppPaths paths, ProfileService profiles, AvatarCatalog avatars, ILocalIdentityProvider identity)
     {
         _store = store;
         _files = files;
         _theme = theme;
         _paths = paths;
+        _profiles = profiles;
+        _avatars = avatars;
+        _identity = identity;
+        RefreshOwnAvatar();
 
         var current = store.Current;
         _isSystemTheme = current.Theme == ThemeChoice.System;
@@ -38,6 +52,22 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     public string DataDirectory => _paths.Root;
+
+    public System.Collections.ObjectModel.ObservableCollection<AvatarOption> AvatarOptions { get; } = [];
+
+    [ObservableProperty]
+    private AvatarVisual? _ownAvatar;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(RemovePictureCommand))]
+    private bool _hasPicture;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(UploadPictureCommand))]
+    private bool _isPreparingPicture;
+
+    [ObservableProperty]
+    private string? _pictureProblem;
 
     [ObservableProperty]
     private bool _isSystemTheme;
@@ -88,6 +118,74 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             Problem = "Windows didn't allow changing whether Roomie starts by itself.";
         }
+    }
+
+    /// <summary>Draws this device's avatar again. The first letter depends on the name, so renaming needs this too.</summary>
+    public void RefreshOwnAvatar()
+    {
+        var self = _identity.Identity;
+        OwnAvatar = _avatars.For(self.DeviceId, self.Username);
+        var own = _profiles.Own;
+        HasPicture = !own.IsSameAs(AvatarChoice.None);
+
+        // Only what changed is replaced, so the button just used keeps the keyboard focus when it can.
+        for (var i = 0; i < _avatars.Presets.Count; i++)
+        {
+            var preset = _avatars.Presets[i];
+            var option = new AvatarOption(preset.Id, preset.Name, AvatarCatalog.ForPreset(preset), own.Preset == preset.Id);
+            if (i >= AvatarOptions.Count)
+            {
+                AvatarOptions.Add(option);
+            }
+            else if (AvatarOptions[i] != option)
+            {
+                AvatarOptions[i] = option;
+            }
+        }
+    }
+
+    [RelayCommand]
+    private void ChooseAvatar(AvatarOption option) => SetPicture(AvatarChoice.FromPreset(option.Id));
+
+    private bool CanUploadPicture() => !IsPreparingPicture;
+
+    [RelayCommand(CanExecute = nameof(CanUploadPicture))]
+    private async Task UploadPictureAsync()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Choose a picture",
+            CheckFileExists = true,
+            Filter = "Pictures|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tif;*.tiff|All files|*.*",
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        IsPreparingPicture = true;
+        try
+        {
+            var png = await Task.Run(() => AvatarImage.Normalize(dialog.FileName));
+            SetPicture(AvatarChoice.FromPicture(png));
+        }
+        catch (AvatarImageException ex)
+        {
+            PictureProblem = ex.Message;
+        }
+        finally
+        {
+            IsPreparingPicture = false;
+        }
+    }
+
+    [RelayCommand(CanExecute = nameof(HasPicture))]
+    private void RemovePicture() => SetPicture(AvatarChoice.None);
+
+    private void SetPicture(AvatarChoice choice)
+    {
+        PictureProblem = _profiles.SetOwn(choice) ? null : "Roomie couldn't save your picture.";
+        RefreshOwnAvatar();
     }
 
     [RelayCommand]

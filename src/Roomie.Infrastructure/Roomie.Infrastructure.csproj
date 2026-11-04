@@ -5,9 +5,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Windows' image decoders, for preparing a profile picture. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.14" />
   </ItemGroup>
 
   <PropertyGroup>

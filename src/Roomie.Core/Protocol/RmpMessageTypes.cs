@@ -32,6 +32,8 @@ public static class RmpMessageTypes
     public const string FileComplete = "FILE_COMPLETE";
     public const string FileAck = "FILE_ACK";
 
+    public const string ProfileUpdate = "PROFILE_UPDATE";
+
     public const string Error = "ERROR";
     public const string Goodbye = "GOODBYE";
 

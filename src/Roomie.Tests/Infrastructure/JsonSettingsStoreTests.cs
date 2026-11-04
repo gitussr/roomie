@@ -69,6 +69,35 @@ public sealed class JsonSettingsStoreTests : IDisposable
         Assert.True(store.Current.Notifications);
     }
 
+    [Theory]
+    [InlineData(false, 0, true)]
+    [InlineData(false, 1, false)]
+    [InlineData(true, 0, false)]
+    [InlineData(true, 2, false)]
+    public void TheWelcome_IsOnlyForSomeoneWhoHasNotSeenItAndHasNothingPaired(bool seen, int paired, bool expected)
+    {
+        Assert.Equal(expected, new AppSettings(HasSeenWelcome: seen).NeedsWelcome(paired));
+    }
+
+    [Fact]
+    public void HavingSeenTheWelcome_SurvivesARestart()
+    {
+        var store = new JsonSettingsStore(SettingsFile);
+
+        Assert.True(store.Update(s => s with { HasSeenWelcome = true }));
+
+        Assert.False(new JsonSettingsStore(SettingsFile).Current.NeedsWelcome(0));
+    }
+
+    [Fact]
+    public void AFileFromBeforeTheWelcome_HasNotSeenIt()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile)!);
+        File.WriteAllText(SettingsFile, "{\"theme\":\"light\",\"hasSeenTrayHint\":true}");
+
+        Assert.True(new JsonSettingsStore(SettingsFile).Current.NeedsWelcome(0));
+    }
+
     [Fact]
     public void WhenSavingFails_TheChangeStillHoldsForThisRun()
     {
