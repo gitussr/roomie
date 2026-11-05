@@ -1291,13 +1291,15 @@ public sealed partial class FileTransferService : BackgroundService
         var folder = FinalFolderOf(receiving.TemporaryPath);
         Directory.CreateDirectory(folder);
         var name = receiving.Offer.Filename;
+
+        // Before the file gets its real name, and it moves with the file, so it's never there without the mark.
+        MarkAsFromElsewhere(receiving.TemporaryPath);
         for (var counter = 0; ; counter++)
         {
             var candidate = Path.Combine(folder, counter == 0 ? name : SafeFilename.WithCounter(name, counter));
             try
             {
                 File.Move(receiving.TemporaryPath, candidate, overwrite: false);
-                MarkAsFromElsewhere(candidate);
                 return candidate;
             }
             catch (IOException) when (File.Exists(candidate) && counter < 1000)

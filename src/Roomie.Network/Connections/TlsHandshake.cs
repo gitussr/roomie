@@ -32,7 +32,7 @@ internal static class TlsHandshake
                 ServerCertificateContext = credentials,
                 ClientCertificateRequired = true,
                 EnabledSslProtocols = Protocols,
-                CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                CertificateChainPolicy = ChainPolicy(),
                 AllowRenegotiation = false,
                 RemoteCertificateValidationCallback = validation.Validate,
             }, cancellationToken).ConfigureAwait(false);
@@ -66,7 +66,7 @@ internal static class TlsHandshake
                 ClientCertificates = [credentials.TargetCertificate],
                 LocalCertificateSelectionCallback = (_, _, _, _, _) => credentials.TargetCertificate,
                 EnabledSslProtocols = Protocols,
-                CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                CertificateChainPolicy = ChainPolicy(),
                 AllowRenegotiation = false,
                 RemoteCertificateValidationCallback = validation.Validate,
             }, cancellationToken).ConfigureAwait(false);
@@ -107,6 +107,17 @@ internal static class TlsHandshake
             : suite;
         return $"{protocol} · {cipher}";
     }
+
+    /// <summary>
+    /// Windows builds a chain for every certificate before Roomie sees it, and by default fetches missing issuers from
+    /// the address the certificate names. A peer chooses that address, and this happens before any trust, so it must
+    /// not reach the network. The chain's result is ignored anyway (<see cref="ValidationState"/>).
+    /// </summary>
+    internal static X509ChainPolicy ChainPolicy() => new()
+    {
+        DisableCertificateDownloads = true,
+        RevocationMode = X509RevocationMode.NoCheck,
+    };
 
     private static RemoteDeviceCertificate Verify(SslStream ssl, ValidationState validation)
     {

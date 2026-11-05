@@ -23,7 +23,7 @@ public static class StartupRegistration
                 return true;
             }
 
-            if (Environment.ProcessPath is not { } path)
+            if (ProgramPath() is not { } path)
             {
                 return false;
             }
@@ -36,4 +36,12 @@ public static class StartupRegistration
             return false;
         }
     }
+
+    /// <summary>
+    /// An installed package's folder has its version in its name, so that path stops working at the next update, and
+    /// Windows won't start a packaged program from it anyway. The alias in the package manifest stays the same.
+    /// </summary>
+    private static string? ProgramPath() => PackageInfo.IsPackaged
+        ? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "roomie.exe")
+        : Environment.ProcessPath;
 }

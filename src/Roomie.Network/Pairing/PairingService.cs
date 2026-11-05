@@ -70,6 +70,14 @@ public sealed class PairingOptions
 
     /// <summary>After this many failures on one session, it is closed and a new connection is required.</summary>
     public int MaxFailuresPerSession { get; init; } = 3;
+
+    /// <summary>
+    /// Requests that may reach the user from one network address within <see cref="RequestWindow"/>. Each one interrupts
+    /// someone, and a new device ID costs nothing, so counting per device wouldn't stop a computer asking again and again.
+    /// </summary>
+    public int MaxRequestsPerAddress { get; init; } = 5;
+
+    public TimeSpan RequestWindow { get; init; } = TimeSpan.FromMinutes(10);
 }
 
 /// <summary>
@@ -92,6 +100,7 @@ public sealed partial class PairingService : IDisposable
     private readonly Lock _gate = new();
     private readonly Dictionary<Guid, List<DateTimeOffset>> _failures = [];
     private readonly Dictionary<Guid, int> _sessionFailures = [];
+    private readonly SlidingWindowRateLimiter _requests;
     private Attempt? _current;
 
     public PairingService(
@@ -112,6 +121,7 @@ public sealed partial class PairingService : IDisposable
         _options = options;
         _time = time;
         _logger = logger;
+        _requests = new SlidingWindowRateLimiter(time, options.MaxRequestsPerAddress, options.RequestWindow);
 
         _registration = _connections.Dispatcher.Register(
             [RmpMessageTypes.PairRequest, RmpMessageTypes.PairResponse, RmpMessageTypes.PairReveal, RmpMessageTypes.PairApprove, RmpMessageTypes.PairReject],
@@ -339,7 +349,7 @@ public sealed partial class PairingService : IDisposable
                 }
             }
 
-            if (refusal is null && (TooManyFailures(remoteId) || _sessionFailures.GetValueOrDefault(remoteId) >= _options.MaxFailuresPerSession))
+            if (refusal is null && (TooManyFailures(remoteId) || _sessionFailures.GetValueOrDefault(remoteId) >= _options.MaxFailuresPerSession || !_requests.TryAcquire(session.RemoteEndPoint.Address)))
             {
                 refusal = PairRejectReasons.TooManyAttempts;
             }

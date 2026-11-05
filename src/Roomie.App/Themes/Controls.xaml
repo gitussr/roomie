@@ -73,6 +73,7 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{DynamicResource HoverBrush}" />
+                            <Setter TargetName="Box" Property="BorderThickness" Value="{DynamicResource HoverLineThickness}" />
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{DynamicResource SelectedBrush}" />
@@ -120,18 +121,20 @@
     <Style x:Key="RowButton" TargetType="Button">
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
         <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="Transparent" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-        <Setter Property="Padding" Value="10,8" />
+        <Setter Property="Padding" Value="8,6" />
         <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="Box" Background="{TemplateBinding Background}" CornerRadius="6">
+                    <Border x:Name="Box" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="2" CornerRadius="6">
                         <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{DynamicResource HoverBrush}" />
+                            <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource RowLineBrush}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -149,7 +152,7 @@
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
                     <Grid>
-                        <Border x:Name="Box" Background="Transparent" CornerRadius="6" />
+                        <Border x:Name="Box" Background="Transparent" BorderBrush="Transparent" BorderThickness="2" CornerRadius="6" />
                         <Border x:Name="Marker" Width="3" Height="26" HorizontalAlignment="Left" CornerRadius="2"
                                 Background="{DynamicResource AccentBrush}" Visibility="Collapsed" />
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
@@ -157,6 +160,7 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{DynamicResource HoverBrush}" />
+                            <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource RowLineBrush}" />
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{DynamicResource SelectedBrush}" />

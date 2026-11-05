@@ -47,10 +47,16 @@ public partial class App : Application
 
     private IHost? _host;
     private ILogger _logger = NullLogger.Instance;
+    private const string StartupFinished = "finished";
+    private static readonly TimeSpan StartupWatchDelay = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan StartupWatchReplyTime = TimeSpan.FromSeconds(3);
+
     private TrayIcon? _tray;
     private Mutex? _singleInstance;
     private EventWaitHandle? _showRequest;
     private RegisteredWaitHandle? _showRequestWait;
+    private bool _showRequestedDuringStartup;
+    private volatile string _startupStep = "loading";
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -118,7 +124,7 @@ public partial class App : Application
                 services.AddSingleton<ITlsCredentialProvider>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<IDeviceSigner>(sp => sp.GetRequiredService<DeviceIdentityStore>());
                 services.AddSingleton<ITrustStore>(trust);
-                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.FileTransfer, RmpCapabilities.Profile] });
+                services.AddSingleton(new ConnectionOptions { AppVersion = AppVersion, Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.FileTransfer, RmpCapabilities.Profile, RmpCapabilities.GroupEnd, RmpCapabilities.DeviceName] });
                 services.AddSingleton<ConnectionManager>();
                 services.AddHostedService(sp => sp.GetRequiredService<ConnectionManager>());
 
@@ -154,6 +160,10 @@ public partial class App : Application
 
         LogStarted(_logger, paths.Root);
 
+        // From here on, a later launch's request to show the window leaves a trace, even if startup never finishes.
+        ListenForShowRequests();
+        _ = WatchStartupAsync();
+
         // The identity must be loaded before the host starts: discovery announces it.
         if (!LoadIdentity(_host.Services.GetRequiredService<DeviceIdentityStore>()))
         {
@@ -173,7 +183,9 @@ public partial class App : Application
         _host.Services.GetRequiredService<FileTransferService>();
         _host.Services.GetRequiredService<ProfileService>();
 
+        StartupStep("starting services");
         await _host.StartAsync();
+        StartupStep("services started");
 
         // A portable copy may have moved since this was turned on.
         if (settings.Current.StartWithWindows)
@@ -182,17 +194,52 @@ public partial class App : Application
         }
 
         Motion.WatchButtons();
+        StartupStep("creating the window");
         var window = _host.Services.GetRequiredService<MainWindow>();
         MainWindow = window;
+        StartupStep("starting the notification icon");
         StartTray(window, _host.Services);
-        ListenForShowRequests(window);
 
         // Started by Windows at sign-in: stay in the notification area until wanted.
-        if (!e.Args.Contains(StartupRegistration.BackgroundArgument))
+        if (!e.Args.Contains(StartupRegistration.BackgroundArgument) || _showRequestedDuringStartup)
         {
+            StartupStep("showing the window");
+            window.ContentRendered += (_, _) => StartupStep(StartupFinished);
             window.PlaySplash();
             window.Show();
         }
+        else
+        {
+            StartupStep(StartupFinished);
+        }
+    }
+
+    /// <summary>Records how far startup got, because nothing else in the log shows it once the services are running.</summary>
+    private void StartupStep(string step)
+    {
+        if (_startupStep != StartupFinished)
+        {
+            _startupStep = step;
+            LogStartupStep(_logger, step);
+        }
+    }
+
+    /// <summary>
+    /// If startup hasn't finished after a while, says where it is and whether the UI thread is stuck or free. This runs
+    /// off the UI thread, so a frozen window can't stop it.
+    /// </summary>
+    private async Task WatchStartupAsync()
+    {
+        await Task.Delay(StartupWatchDelay).ConfigureAwait(false);
+        if (_startupStep == StartupFinished)
+        {
+            return;
+        }
+
+        var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = Dispatcher.BeginInvoke(() => answered.TrySetResult());
+        var responding = await Task.WhenAny(answered.Task, Task.Delay(StartupWatchReplyTime)).ConfigureAwait(false) == answered.Task;
+        LogStartupSlow(_logger, _startupStep, responding);
     }
 
     protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
@@ -204,7 +251,7 @@ public partial class App : Application
 
     private void StartTray(MainWindow window, IServiceProvider services)
     {
-        var tray = new TrayIcon();
+        var tray = new TrayIcon(Dispatcher, _logger);
         _tray = tray;
         var main = services.GetRequiredService<MainViewModel>();
 
@@ -302,13 +349,28 @@ public partial class App : Application
         return null;
     }
 
-    private void ListenForShowRequests(MainWindow window)
+    private void ListenForShowRequests()
     {
         if (_showRequest is { } request)
         {
             _showRequestWait = ThreadPool.RegisterWaitForSingleObject(
                 request,
-                (_, _) => Dispatcher.BeginInvoke(window.ShowFromTray),
+                (_, _) =>
+                {
+                    LogShowRequested(_logger, _startupStep);
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        if (MainWindow is MainWindow window)
+                        {
+                            window.ShowFromTray();
+                        }
+                        else
+                        {
+                            // Still starting. Without this, one started at sign-in would stay hidden.
+                            _showRequestedDuringStartup = true;
+                        }
+                    });
+                },
                 null,
                 Timeout.Infinite,
                 executeOnlyOnce: false);
@@ -407,6 +469,15 @@ public partial class App : Application
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Roomie started. Data directory: {DataDirectory}")]
     private static partial void LogStarted(ILogger logger, string dataDirectory);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Startup: {Step}")]
+    private static partial void LogStartupStep(ILogger logger, string step);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Startup hasn't finished: stuck at {Step}, UI thread responding: {Responding}")]
+    private static partial void LogStartupSlow(ILogger logger, string step, bool responding);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Another launch asked to show the window (startup: {Step})")]
+    private static partial void LogShowRequested(ILogger logger, string step);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Device identity {Outcome}: {DisplayId} ({Fingerprint})")]
     private static partial void LogIdentityLoaded(ILogger logger, IdentityLoadOutcome outcome, string displayId, string fingerprint);

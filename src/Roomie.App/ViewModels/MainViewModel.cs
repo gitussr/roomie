@@ -49,7 +49,11 @@ public sealed record NearbyDevice(
     bool CanForget,
     bool CanUnblock,
     bool CanChat = false,
-    AvatarVisual? Avatar = null);
+    AvatarVisual? Avatar = null)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => string.Join(", ", new[] { Username, Connection, Problem }.Where(part => !string.IsNullOrEmpty(part)));
+}
 
 /// <summary>A row in the list of conversations: a paired device or a group.</summary>
 public sealed record ConversationItem(
@@ -71,12 +75,19 @@ public sealed record ConversationItem(
     public bool HasUnread => Unread > 0;
 
     /// <summary>Spelled out because a coloured dot alone tells a screen reader, or someone who can't see the colour, nothing.</summary>
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => Description;
+
     public string Description =>
         $"{Name}, {(IsGroup ? "group" : IsOnline ? "online" : "offline")}{(HasUnread ? $", {Unread} unread" : string.Empty)}";
 }
 
 /// <summary>An invitation waiting for this user's answer.</summary>
-public sealed record GroupInviteItem(string GroupId, Guid OwnerId, string GroupName, string Details);
+public sealed record GroupInviteItem(string GroupId, Guid OwnerId, string GroupName, string Details)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => $"{GroupName}, {Details}";
+}
 
 public sealed partial class MainViewModel : ObservableObject
 {
@@ -93,6 +104,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly ITrustStore _trust;
     private readonly IMessageStore _messages;
     private readonly AvatarCatalog _avatars;
+    private readonly ProfileService _profiles;
     private readonly SynchronizationContext _ui;
     private int _refreshQueued;
 
@@ -118,6 +130,7 @@ public sealed partial class MainViewModel : ObservableObject
         _files = files;
         Settings = settings;
         _avatars = avatars;
+        _profiles = profiles;
         Chat = new ChatViewModel(messaging, groups, files, messages, trust, identityStore, avatars);
         Chat.FilesChanged += (_, _) => RefreshTransfers();
 
@@ -289,6 +302,8 @@ public sealed partial class MainViewModel : ObservableObject
         Settings.RefreshOwnAvatar();
         SaveUsernameCommand.NotifyCanExecuteChanged();
         _discovery.AnnounceNow();
+        _profiles.AnnounceOwnName();
+        _groups.RefreshOwnedNames();
         return null;
     }
 
@@ -466,7 +481,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Chat.PeerId is { } chatPeer)
         {
             var info = ConnectionOf(chatPeer);
-            Chat.Update(info.IsConnected ? "Connected" : "Not connected. Messages will be sent when this device is back.");
+            Chat.Update(info.IsConnected ? "Connected" : "Offline. Messages will be sent when this device is back.");
         }
         else if (Chat.GroupId is not null)
         {
@@ -501,8 +516,11 @@ public sealed partial class MainViewModel : ObservableObject
             var address = peer.Addresses.Count > 1
                 ? $"{peer.Addresses[0]} (+{peer.Addresses.Count - 1})"
                 : peer.Addresses.Count == 1 ? peer.Addresses[0].ToString() : string.Empty;
-            devices.Add(ToItem(peer.Username, peer.DisplayId, address, $"Roomie {peer.AppVersion}",
-                ConnectionOf(peer.DeviceId), trusted.ContainsKey(peer.DeviceId), blocked.Contains(peer.DeviceId), pairingBusy));
+
+            // Announcements are unauthenticated, so anyone can send one claiming a paired device's ID and any name.
+            var isTrusted = trusted.TryGetValue(peer.DeviceId, out var pinned);
+            devices.Add(ToItem(isTrusted ? pinned!.Username : peer.Username, peer.DisplayId, address, $"Roomie {peer.AppVersion}",
+                ConnectionOf(peer.DeviceId), isTrusted, blocked.Contains(peer.DeviceId), pairingBusy));
         }
 
         // Connected devices whose announcements stopped reaching us, then paired devices that are offline.
@@ -629,10 +647,13 @@ public sealed partial class MainViewModel : ObservableObject
                 // As above.
             }
 
+            // Once a group has ended, that matters more than its last message.
             var details = group.IsMember
-                ? $"{group.State.Members.Count} {(group.State.Members.Count == 1 ? "member" : "members")}"
+                ? PreviewOf(last, group.State) ?? $"{group.State.Members.Count} {(group.State.Members.Count == 1 ? "member" : "members")}"
+                : group.IsDeleted ? "Group deleted"
+                : group.HasLeft ? "You left"
                 : "You were removed";
-            conversations.Add(new ConversationItem(null, group.State.GroupId, group.State.Name, PreviewOf(last, group.State) ?? details,
+            conversations.Add(new ConversationItem(null, group.State.GroupId, group.State.Name, details,
                 TimeOf(last), unread.GetValueOrDefault(group.State.GroupId), false, Chat.GroupId == group.State.GroupId,
                 last?.Timestamp ?? DateTimeOffset.MinValue, AvatarCatalog.Letter(group.State.Name)));
         }
@@ -653,7 +674,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static StoredMessage? LastOf(IReadOnlyList<StoredMessage> messages) => messages.Count > 0 ? messages[^1] : null;
 
-    private static string? PreviewOf(StoredMessage? message, GroupState? group)
+    private string? PreviewOf(StoredMessage? message, GroupState? group)
     {
         if (message is null)
         {
@@ -666,7 +687,7 @@ public sealed partial class MainViewModel : ObservableObject
             return $"You: {text}";
         }
 
-        var sender = group?.Members.FirstOrDefault(m => m.DeviceId == message.PeerId)?.Username;
+        var sender = group is null ? null : _trust.FindTrusted(message.PeerId)?.Username ?? group.Members.FirstOrDefault(m => m.DeviceId == message.PeerId)?.Username;
         return sender is null ? text : $"{sender}: {text}";
     }
 

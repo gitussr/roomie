@@ -12,6 +12,9 @@ namespace Roomie.App.ViewModels;
 /// </summary>
 public sealed partial class FileTransferItem(Guid transferId, Guid peerId, MessageDirection direction, string name) : ObservableObject
 {
+    /// <summary>What a screen reader says for this row.</summary>
+    public override string ToString() => string.IsNullOrEmpty(Status) ? Name : $"{Name}, {Status}";
+
     private readonly TransferSpeed _speed = new();
 
     public Guid TransferId { get; } = transferId;

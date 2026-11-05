@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
@@ -18,13 +19,25 @@ using Roomie.Network.Messaging;
 namespace Roomie.App.ViewModels;
 
 /// <summary>One message as shown in the conversation.</summary>
-public sealed record ChatBubble(Guid MessageId, string Text, bool IsMine, string Time, string Status, bool IsProblem, string? Sender = null);
+public sealed record ChatBubble(Guid MessageId, string Text, bool IsMine, string Time, string Status, bool IsProblem, string? Sender = null)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => string.Join(", ", new[] { Sender, Text, Time, Status }.Where(part => !string.IsNullOrEmpty(part)));
+}
 
 /// <summary>A member of the open group.</summary>
-public sealed record GroupMemberItem(Guid DeviceId, string Name, string Status, bool CanRemove);
+public sealed record GroupMemberItem(Guid DeviceId, string Name, string Status, bool CanRemove)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => string.IsNullOrEmpty(Status) ? Name : $"{Name}, {Status}";
+}
 
 /// <summary>A paired device the owner of the open group could invite.</summary>
-public sealed record GroupInviteCandidate(Guid DeviceId, string Name);
+public sealed record GroupInviteCandidate(Guid DeviceId, string Name)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => Name;
+}
 
 /// <summary>The open conversation, with one device or a group. The whole list is rebuilt from the store on every change.</summary>
 public sealed partial class ChatViewModel(MessagingService messaging, GroupService groups, FileTransferService files, IMessageStore store, ITrustStore trust, ILocalIdentityProvider identity, AvatarCatalog avatars) : ObservableObject
@@ -83,14 +96,18 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     [ObservableProperty]
     private string _membersTitle = string.Empty;
 
+    /// <summary>What can be done to end the open group here: delete, leave or clear it, depending on this device's place in it.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasGroupAction))]
+    private string? _groupActionText;
+
+    public bool HasGroupAction => GroupActionText is not null;
+
     [ObservableProperty]
     private AvatarVisual? _peerAvatar;
 
     [ObservableProperty]
     private string _peerName = string.Empty;
-
-    [ObservableProperty]
-    private string _peerDisplayId = string.Empty;
 
     [ObservableProperty]
     private string _connection = string.Empty;
@@ -121,6 +138,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         GroupId = null;
         IsGroup = false;
         IsOpen = true;
+        GroupActionText = null;
     }
 
     public void OpenGroup(string groupId)
@@ -157,7 +175,6 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         var peer = trust.FindTrusted(peerId);
         PeerName = peer?.Username ?? DeviceIdFormat.ToDisplayId(peerId);
         PeerAvatar = avatars.For(peerId, PeerName);
-        PeerDisplayId = DeviceIdFormat.ToDisplayId(peerId);
         Connection = connection;
         CanCompose = peer is not null && !trust.IsBlocked(peerId);
         Problem = CanCompose ? messaging.GetDeliveryProblem(peerId) : "This device isn't paired, so you can't send it messages.";
@@ -335,11 +352,13 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         var isOwner = state.OwnerId == self && group.IsMember;
         PeerName = state.Name;
         PeerAvatar = AvatarCatalog.Letter(state.Name);
-        PeerDisplayId = "Group";
         Connection = group.IsMember
-            ? $"{state.Members.Count} {(state.Members.Count == 1 ? "member" : "members")} · owner {NameOf(state, state.OwnerId)}"
-            : "You're no longer in this group";
+            ? $"Group · {state.Members.Count} {(state.Members.Count == 1 ? "member" : "members")} · owner {NameOf(state, state.OwnerId)}"
+            : group.IsDeleted ? "Group · This group was deleted"
+            : group.HasLeft ? "Group · You left this group"
+            : "Group · You're no longer in this group";
         CanCompose = group.IsMember;
+        GroupActionText = !group.IsMember ? "Remove from this computer" : isOwner ? "Delete group" : "Leave group";
         MembersTitle = $"Members ({state.Members.Count})";
 
         var unpaired = state.Members
@@ -347,18 +366,18 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
             .Select(m => m.Username)
             .ToList();
         Problem = !group.IsMember
-            ? "You were removed from this group. Its history stays on this computer, but you can't send to it."
+            ? EndedMessage(group, self)
             : unpaired.Count > 0
                 ? $"You aren't paired with {string.Join(", ", unpaired)}. They won't get your messages until you pair with them."
                 : null;
 
         var invited = invites
-            .Where(i => i.GroupId == groupId && i.Direction == InviteDirection.Outgoing)
+            .Where(i => group.IsMember && i.GroupId == groupId && i.Direction == InviteDirection.Outgoing)
             .Select(i => i.PeerId)
             .ToHashSet();
 
         var members = state.Members
-            .Select(m => new GroupMemberItem(m.DeviceId, m.Username, MemberStatus(state, m.DeviceId), isOwner && m.DeviceId != self))
+            .Select(m => new GroupMemberItem(m.DeviceId, CurrentName(m), MemberStatus(state, m.DeviceId), isOwner && m.DeviceId != self))
             .Concat(invited.Where(id => !state.HasMember(id)).Select(id => new GroupMemberItem(
                 id, trust.FindTrusted(id)?.Username ?? DeviceIdFormat.ToDisplayId(id), "Invited, not answered yet", isOwner)))
             .ToList();
@@ -420,6 +439,54 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
     }
 
     [RelayCommand]
+    private void GroupAction()
+    {
+        if (GroupId is not { } groupId || groups.GetGroup(groupId) is not { } group)
+        {
+            return;
+        }
+
+        var name = group.State.Name;
+        var isOwner = group.State.OwnerId == identity.Identity.DeviceId;
+        if (!group.IsMember)
+        {
+            if (Confirm($"Remove \"{name}\" and its messages from this computer?\n\nThis can't be undone. Other computers keep their own copies."))
+            {
+                SendError = groups.RemoveFromThisComputer(groupId).Error;
+                if (SendError is null)
+                {
+                    Close();
+                }
+            }
+        }
+        else if (isOwner)
+        {
+            if (Confirm($"Delete \"{name}\" for everyone?\n\nNobody will be able to send to it again, and this can't be undone. Each computer keeps its messages until its user removes them. Computers that are off now are told when they next connect."))
+            {
+                SendError = groups.Delete(groupId).Error;
+            }
+        }
+        else if (Confirm($"Leave \"{name}\"?\n\nYou won't get its messages any more, and only its owner can invite you back. Your copy of its messages stays on this computer until you remove it."))
+        {
+            SendError = groups.Leave(groupId).Error;
+        }
+    }
+
+    private static bool Confirm(string question) =>
+        MessageBox.Show(question, "Roomie", MessageBoxButton.OKCancel, MessageBoxImage.Warning, MessageBoxResult.Cancel) == MessageBoxResult.OK;
+
+    private static string EndedMessage(StoredGroup group, Guid self)
+    {
+        const string History = "Its history stays on this computer until you remove it, but you can't send to it.";
+        if (group.IsDeleted)
+        {
+            return $"{(group.State.OwnerId == self ? "You" : "The owner")} deleted this group. {History}";
+        }
+
+        return $"{(group.HasLeft ? "You left this group." : "You were removed from this group.")} {History}";
+    }
+
+    [RelayCommand]
     private void Close()
     {
         Reset();
@@ -437,6 +504,7 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
         Messages.Clear();
         Members.Clear();
         InviteCandidates.Clear();
+        GroupActionText = null;
         Files.Clear();
         HasFiles = false;
     }
@@ -471,9 +539,13 @@ public sealed partial class ChatViewModel(MessagingService messaging, GroupServi
 
     private string NameOf(GroupState state, Guid deviceId) =>
         deviceId == identity.Identity.DeviceId ? "you"
-        : state.Members.FirstOrDefault(m => m.DeviceId == deviceId)?.Username
-          ?? trust.FindTrusted(deviceId)?.Username
+        : trust.FindTrusted(deviceId)?.Username
+          ?? state.Members.FirstOrDefault(m => m.DeviceId == deviceId)?.Username
           ?? DeviceIdFormat.ToDisplayId(deviceId);
+
+    /// <summary>A paired device's own latest name can be newer than the membership the owner last signed.</summary>
+    private string CurrentName(GroupMember member) =>
+        member.DeviceId == identity.Identity.DeviceId ? identity.Identity.Username : trust.FindTrusted(member.DeviceId)?.Username ?? member.Username;
 
     // Changes only what differs, so the scroll position and any selected text survive an update.
     private void Sync(List<ChatBubble> wanted)

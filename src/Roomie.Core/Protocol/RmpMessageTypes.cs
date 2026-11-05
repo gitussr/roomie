@@ -23,6 +23,9 @@ public static class RmpMessageTypes
     public const string GroupRemove = "GROUP_REMOVE";
     public const string GroupState = "GROUP_STATE";
     public const string GroupStateRequest = "GROUP_STATE_REQUEST";
+    public const string GroupDelete = "GROUP_DELETE";
+    public const string GroupLeave = "GROUP_LEAVE";
+    public const string ProfileName = "PROFILE_NAME";
 
     public const string FileOffer = "FILE_OFFER";
     public const string FileAccept = "FILE_ACCEPT";

@@ -33,6 +33,9 @@ public sealed partial class GroupService : IDisposable
     private readonly IDisposable _registration;
 
     private readonly Lock _gate = new();
+
+    // Held while the owner works out the next version, so two changes can't both claim it.
+    private readonly Lock _ownerGate = new();
     private readonly Dictionary<Guid, SentThisSession> _sent = [];
     private readonly Dictionary<(string Group, Guid Peer), DateTimeOffset> _lastStateTraffic = [];
 
@@ -54,8 +57,9 @@ public sealed partial class GroupService : IDisposable
         _logger = logger;
 
         _registration = connections.Dispatcher.Register(
-            [RmpMessageTypes.GroupInvite, RmpMessageTypes.GroupAccept, RmpMessageTypes.GroupRemove, RmpMessageTypes.GroupState, RmpMessageTypes.GroupStateRequest],
+            [RmpMessageTypes.GroupInvite, RmpMessageTypes.GroupAccept, RmpMessageTypes.GroupRemove, RmpMessageTypes.GroupState, RmpMessageTypes.GroupStateRequest, RmpMessageTypes.GroupDelete, RmpMessageTypes.GroupLeave],
             HandleMessageAsync);
+        _trust.Changed += OnTrustChanged;
     }
 
     /// <summary>Raised on any thread when groups or invitations change.</summary>
@@ -125,34 +129,110 @@ public sealed partial class GroupService : IDisposable
     {
         return Attempt(groupId, "remove this device", () =>
         {
-            var group = RequireOwnedGroup(groupId);
-            if (peerId == Self)
+            lock (_ownerGate)
             {
-                throw new GroupActionException("The owner can't be removed from the group.");
-            }
-
-            _store.DeleteInvite(groupId, peerId, InviteDirection.Outgoing);
-            if (group.State.HasMember(peerId))
-            {
-                var version = group.Version + 1;
-                var eventId = Guid.CreateVersion7(_time.GetUtcNow());
-                var state = group.State with
+                var group = RequireOwnedGroup(groupId);
+                if (peerId == Self)
                 {
-                    MembershipVersion = version,
-                    EventId = eventId,
-                    Members = group.State.Members.Where(m => m.DeviceId != peerId).ToList(),
-                };
-                var removal = new GroupRemoval(groupId, Self, peerId, version, eventId);
+                    throw new GroupActionException("The owner can't be removed from the group.");
+                }
 
-                // The notice first: if Roomie stops between the two, sending it again is harmless.
-                _store.SaveRemovalNotice(new StoredRemovalNotice(groupId, peerId, GroupProtocol.Sign(removal, _signer)));
-                _store.SaveGroup(new StoredGroup(GroupProtocol.Sign(state, _signer), state, version, true));
-                RaiseWork(state.Members.Select(m => m.DeviceId));
+                RemoveDevice(group, peerId);
+            }
+        });
+    }
+
+    /// <summary>Ends the group for everyone. Each device keeps its history until its user removes it.</summary>
+    public GroupActionResult Delete(string groupId)
+    {
+        return Attempt(groupId, "delete this group", () =>
+        {
+            lock (_ownerGate)
+            {
+                var group = RequireOwnedGroup(groupId);
+                var version = group.Version + 1;
+                var deletion = new GroupDeletion(groupId, Self, version, Guid.CreateVersion7(_time.GetUtcNow()));
+
+                // Unanswered invitations stay, so those devices are told too.
+                _store.SaveGroup(group with { Version = version, IsMember = false, Deletion = GroupProtocol.Sign(deletion, _signer) });
+                RaiseChanged();
+                RaiseWork(group.State.Members.Select(m => m.DeviceId));
+                RaiseWork(_store.GetInvites().Where(i => i.GroupId == groupId && i.Direction == InviteDirection.Outgoing).Select(i => i.PeerId));
+            }
+        });
+    }
+
+    /// <summary>Leaves a group this device doesn't own. The owner is told, now or when it's next connected.</summary>
+    public GroupActionResult Leave(string groupId)
+    {
+        return Attempt(groupId, "leave this group", () =>
+        {
+            if (_store.GetGroup(groupId) is not { IsMember: true } group)
+            {
+                throw new GroupActionException("You're no longer in this group.");
             }
 
+            if (group.State.OwnerId == Self)
+            {
+                throw new GroupActionException("The owner can't leave a group, only delete it.");
+            }
+
+            _store.SaveGroup(group with { IsMember = false, HasLeft = true });
             RaiseChanged();
-            RaiseWork(peerId);
+            RaiseWork(group.State.OwnerId);
         });
+    }
+
+    /// <summary>Removes a group that has ended for this device, and its messages, from this computer.</summary>
+    public GroupActionResult RemoveFromThisComputer(string groupId)
+    {
+        return Attempt(groupId, "remove this group", () =>
+        {
+            if (_store.GetGroup(groupId) is not { } group)
+            {
+                return;
+            }
+
+            if (group.IsMember)
+            {
+                throw new GroupActionException("Leave or delete this group first.");
+            }
+
+            _store.HideGroup(groupId);
+            RaiseChanged();
+        });
+    }
+
+    /// <summary>
+    /// Puts current names into the groups this device owns, so members who aren't paired with a renamed device
+    /// see the new name too. Call after this device's own name changes. A paired device's change arrives by itself.
+    /// </summary>
+    public void RefreshOwnedNames()
+    {
+        try
+        {
+            lock (_ownerGate)
+            {
+                foreach (var group in _store.GetGroups().Where(g => g.IsMember && g.State.OwnerId == Self))
+                {
+                    var members = group.State.Members.Select(m => m with { Username = CurrentName(m) }).ToList();
+                    if (members.SequenceEqual(group.State.Members))
+                    {
+                        continue;
+                    }
+
+                    var state = group.State with { MembershipVersion = group.Version + 1, EventId = Guid.CreateVersion7(_time.GetUtcNow()), Members = members };
+                    _store.SaveGroup(new StoredGroup(GroupProtocol.Sign(state, _signer), state, state.MembershipVersion, true));
+                    RaiseChanged();
+                    RaiseWork(members.Select(m => m.DeviceId));
+                }
+            }
+        }
+        catch (MessageStoreException ex)
+        {
+            // The next change of any name tries again, and the names shown locally are already current.
+            LogNamesNotSaved(_logger, ex.Message);
+        }
     }
 
     public GroupActionResult RespondToInvite(string groupId, Guid ownerId, bool accept)
@@ -225,7 +305,8 @@ public sealed partial class GroupService : IDisposable
         }
 
         var peer = session.RemoteDeviceId;
-        var groups = _store.GetGroups().ToDictionary(g => g.State.GroupId);
+        var groups = _store.GetGroups(includeHidden: true).ToDictionary(g => g.State.GroupId);
+        var canEnd = session.Supports(RmpCapabilities.GroupEnd);
 
         foreach (var notice in _store.GetRemovalNotices(peer))
         {
@@ -234,7 +315,14 @@ public sealed partial class GroupService : IDisposable
 
         foreach (var invite in _store.GetInvites().Where(i => i.PeerId == peer))
         {
-            if (invite.Direction == InviteDirection.Outgoing && invite.Response == InviteResponse.None && groups.TryGetValue(invite.GroupId, out var owned))
+            if (invite.Direction == InviteDirection.Outgoing && groups.TryGetValue(invite.GroupId, out var ended) && ended.Deletion is { } withdrawn)
+            {
+                if (canEnd)
+                {
+                    await SendOnceAsync(session, $"delete:{invite.GroupId}", RmpMessageTypes.GroupDelete, withdrawn, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            else if (invite.Direction == InviteDirection.Outgoing && invite.Response == InviteResponse.None && groups.TryGetValue(invite.GroupId, out var owned))
             {
                 var payload = new GroupInvitePayload(invite.InviteId, owned.SignedDocument.Document, owned.SignedDocument.Signature);
                 await SendOnceAsync(session, $"invite:{invite.InviteId}:{owned.Version}", RmpMessageTypes.GroupInvite, payload, cancellationToken).ConfigureAwait(false);
@@ -250,6 +338,25 @@ public sealed partial class GroupService : IDisposable
         {
             await SendOnceAsync(session, $"state:{group.State.GroupId}:{group.Version}", RmpMessageTypes.GroupState, group.SignedDocument, cancellationToken).ConfigureAwait(false);
         }
+
+        // A device on an older version hears about these once it updates, because nothing here is thrown away.
+        if (!canEnd)
+        {
+            return;
+        }
+
+        foreach (var group in groups.Values.Where(g => g.State.HasMember(peer)))
+        {
+            if (group.Deletion is { } deletion)
+            {
+                await SendOnceAsync(session, $"delete:{group.State.GroupId}", RmpMessageTypes.GroupDelete, deletion, cancellationToken).ConfigureAwait(false);
+            }
+            else if (group.HasLeft && group.State.OwnerId == peer && group.Version == group.State.MembershipVersion)
+            {
+                // A higher version means the owner's removal arrived, so it knows.
+                await SendOnceAsync(session, $"leave:{group.State.GroupId}:{group.Version}", RmpMessageTypes.GroupLeave, new GroupLeavePayload(group.State.GroupId), cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     public IReadOnlyList<StoredGroup> GetGroups() => _store.GetGroups();
@@ -258,7 +365,11 @@ public sealed partial class GroupService : IDisposable
 
     public IReadOnlyList<StoredInvite> GetInvites() => _store.GetInvites();
 
-    public void Dispose() => _registration.Dispose();
+    public void Dispose()
+    {
+        _trust.Changed -= OnTrustChanged;
+        _registration.Dispose();
+    }
 
     private async ValueTask HandleMessageAsync(PeerSession session, RmpEnvelope message, CancellationToken cancellationToken)
     {
@@ -278,6 +389,14 @@ public sealed partial class GroupService : IDisposable
 
             case RmpMessageTypes.GroupState:
                 OnState(session, SessionPayloads.TryDeserialize<SignedGroupDocument>(message.Payload)!);
+                break;
+
+            case RmpMessageTypes.GroupDelete:
+                OnDeletion(session, SessionPayloads.TryDeserialize<SignedGroupDocument>(message.Payload)!);
+                break;
+
+            case RmpMessageTypes.GroupLeave:
+                OnLeave(session, SessionPayloads.TryDeserialize<GroupLeavePayload>(message.Payload)!);
                 break;
 
             case RmpMessageTypes.GroupStateRequest:
@@ -304,7 +423,7 @@ public sealed partial class GroupService : IDisposable
             throw new RmpProtocolException(RmpErrorCodes.InvalidFrame, "That group belongs to another device.");
         }
 
-        if (known is { IsMember: true })
+        if (known is { IsMember: true } or { IsDeleted: true })
         {
             return;
         }
@@ -335,30 +454,34 @@ public sealed partial class GroupService : IDisposable
     private void OnAnswer(PeerSession session, GroupAcceptPayload answer)
     {
         var sender = session.RemoteDeviceId;
-        if (_store.GetInvite(answer.GroupId, sender, InviteDirection.Outgoing) is not { } invite
-            || invite.InviteId != answer.InviteId
-            || _store.GetGroup(answer.GroupId) is not { } group
-            || group.State.OwnerId != Self)
+        lock (_ownerGate)
         {
-            return;
-        }
-
-        if (answer.Accepted && !group.State.HasMember(sender) && group.State.Members.Count < GroupProtocol.MaxMembers)
-        {
-            var username = _trust.FindTrusted(sender)?.Username ?? DeviceIdFormat.ToDisplayId(sender);
-            var state = group.State with
+            // A deleted group keeps its invitation, because that device still has to be told.
+            if (_store.GetInvite(answer.GroupId, sender, InviteDirection.Outgoing) is not { } invite
+                || invite.InviteId != answer.InviteId
+                || _store.GetGroup(answer.GroupId) is not { IsDeleted: false } group
+                || group.State.OwnerId != Self)
             {
-                MembershipVersion = group.Version + 1,
-                EventId = Guid.CreateVersion7(_time.GetUtcNow()),
-                Members = [.. group.State.Members, new GroupMember(sender, username)],
-            };
-            _store.SaveGroup(new StoredGroup(GroupProtocol.Sign(state, _signer), state, state.MembershipVersion, true));
-            _store.DeleteRemovalNotice(answer.GroupId, sender);
-            RaiseWork(state.Members.Select(m => m.DeviceId));
-        }
+                return;
+            }
 
-        _store.DeleteInvite(answer.GroupId, sender, InviteDirection.Outgoing);
-        RaiseChanged();
+            if (answer.Accepted && !group.State.HasMember(sender) && group.State.Members.Count < GroupProtocol.MaxMembers)
+            {
+                var username = _trust.FindTrusted(sender)?.Username ?? DeviceIdFormat.ToDisplayId(sender);
+                var state = group.State with
+                {
+                    MembershipVersion = group.Version + 1,
+                    EventId = Guid.CreateVersion7(_time.GetUtcNow()),
+                    Members = [.. group.State.Members, new GroupMember(sender, username)],
+                };
+                _store.SaveGroup(new StoredGroup(GroupProtocol.Sign(state, _signer), state, state.MembershipVersion, true));
+                _store.DeleteRemovalNotice(answer.GroupId, sender);
+                RaiseWork(state.Members.Select(m => m.DeviceId));
+            }
+
+            _store.DeleteInvite(answer.GroupId, sender, InviteDirection.Outgoing);
+            RaiseChanged();
+        }
     }
 
     private void OnState(PeerSession session, SignedGroupDocument signedDocument)
@@ -373,7 +496,7 @@ public sealed partial class GroupService : IDisposable
         string ownerKey;
         if (known is not null)
         {
-            if (state.OwnerId != known.State.OwnerId || state.MembershipVersion <= known.Version)
+            if (known.IsDeleted || state.OwnerId != known.State.OwnerId || state.MembershipVersion <= known.Version)
             {
                 return;
             }
@@ -434,10 +557,111 @@ public sealed partial class GroupService : IDisposable
         RaiseChanged();
     }
 
+    /// <summary>
+    /// Any device may relay a deletion, so only the signature counts: the key saved with the group, or for a device
+    /// that was only invited, the one its invitation was checked against.
+    /// </summary>
+    private void OnDeletion(PeerSession session, SignedGroupDocument signedDocument)
+    {
+        if (!GroupProtocol.TryReadDeletion(signedDocument, out var deletion))
+        {
+            return;
+        }
+
+        var group = _store.GetGroup(deletion.GroupId);
+        var invite = _store.GetInvite(deletion.GroupId, deletion.OwnerId, InviteDirection.Incoming);
+        string? ownerKey = null;
+        if (group is not null)
+        {
+            ownerKey = group.State.OwnerId == deletion.OwnerId ? group.State.OwnerPublicKey : null;
+        }
+        else if (invite?.SignedDocument is { } invited && GroupProtocol.TryReadState(invited, out var state) && state.OwnerId == deletion.OwnerId)
+        {
+            ownerKey = state.OwnerPublicKey;
+        }
+
+        if (ownerKey is null)
+        {
+            return;
+        }
+
+        if (!GroupProtocol.IsDeletionSignedBy(signedDocument, ownerKey))
+        {
+            LogBadSignature(_logger, session.RemoteDeviceId, deletion.GroupId);
+            return;
+        }
+
+        if (invite is not null)
+        {
+            _store.DeleteInvite(deletion.GroupId, deletion.OwnerId, InviteDirection.Incoming);
+        }
+
+        if (group is { IsDeleted: false })
+        {
+            _store.SaveGroup(group with { Version = Math.Max(group.Version, deletion.MembershipVersion), IsMember = false, Deletion = signedDocument });
+            RaiseWork(group.State.Members.Select(m => m.DeviceId));
+        }
+
+        RaiseChanged();
+    }
+
+    /// <summary>The session proves who is asking, and a device can only ever take itself out.</summary>
+    private void OnLeave(PeerSession session, GroupLeavePayload request)
+    {
+        var sender = session.RemoteDeviceId;
+        lock (_ownerGate)
+        {
+            if (sender != Self
+                && _store.GetGroup(request.GroupId) is { IsMember: true, IsDeleted: false } group
+                && group.State.OwnerId == Self
+                && group.State.HasMember(sender))
+            {
+                RemoveDevice(group, sender);
+            }
+        }
+    }
+
+    /// <summary>Takes a device out of a group this device owns, or withdraws its invitation. Call holding the owner gate.</summary>
+    private void RemoveDevice(StoredGroup group, Guid peerId)
+    {
+        var groupId = group.State.GroupId;
+        _store.DeleteInvite(groupId, peerId, InviteDirection.Outgoing);
+        if (group.State.HasMember(peerId))
+        {
+            var version = group.Version + 1;
+            var eventId = Guid.CreateVersion7(_time.GetUtcNow());
+            var state = group.State with
+            {
+                MembershipVersion = version,
+                EventId = eventId,
+                Members = group.State.Members.Where(m => m.DeviceId != peerId).ToList(),
+            };
+            var removal = new GroupRemoval(groupId, Self, peerId, version, eventId);
+
+            // The notice first: if Roomie stops between the two, sending it again is harmless.
+            _store.SaveRemovalNotice(new StoredRemovalNotice(groupId, peerId, GroupProtocol.Sign(removal, _signer)));
+            _store.SaveGroup(new StoredGroup(GroupProtocol.Sign(state, _signer), state, version, true));
+            RaiseWork(state.Members.Select(m => m.DeviceId));
+        }
+
+        RaiseChanged();
+        RaiseWork(peerId);
+    }
+
+    private void OnTrustChanged(object? sender, EventArgs e) => RefreshOwnedNames();
+
+    private string CurrentName(GroupMember member) =>
+        member.DeviceId == Self ? _identity.Identity.Username : _trust.FindTrusted(member.DeviceId)?.Username ?? member.Username;
+
     private async ValueTask OnStateRequestAsync(PeerSession session, GroupStateRequestPayload request, CancellationToken cancellationToken)
     {
         var peer = session.RemoteDeviceId;
-        if (_store.GetGroup(request.GroupId) is { IsMember: true } group && group.State.HasMember(peer))
+        var known = _store.GetGroup(request.GroupId);
+        if (known is { Deletion: { } deletion } && known.State.HasMember(peer) && session.Supports(RmpCapabilities.GroupEnd))
+        {
+            await session.SendAsync(RmpMessageTypes.GroupDelete, SessionPayloads.ToElement(deletion), cancellationToken).ConfigureAwait(false);
+        }
+        else if (known is { IsMember: true } group && group.State.HasMember(peer))
         {
             await session.SendAsync(RmpMessageTypes.GroupState, SessionPayloads.ToElement(group.SignedDocument), cancellationToken).ConfigureAwait(false);
         }
@@ -512,6 +736,11 @@ public sealed partial class GroupService : IDisposable
             throw new GroupActionException("Only the group's owner can change who is in it.");
         }
 
+        if (group.IsDeleted)
+        {
+            throw new GroupActionException("This group was deleted.");
+        }
+
         return group;
     }
 
@@ -547,6 +776,9 @@ public sealed partial class GroupService : IDisposable
     private sealed record SentThisSession(Guid SessionId, HashSet<string> Keys);
 
     private sealed class GroupActionException(string message) : Exception(message);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Couldn't save new names in a group: {Reason}")]
+    private static partial void LogNamesNotSaved(ILogger logger, string reason);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "{DeviceId} sent a document for group {GroupId} that its owner didn't sign")]
     private static partial void LogBadSignature(ILogger logger, Guid deviceId, string groupId);

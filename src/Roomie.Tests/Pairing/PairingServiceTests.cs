@@ -65,6 +65,31 @@ public sealed class PairingServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task OneAddress_CantKeepInterruptingTheUser()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob", new PairingOptions { MaxRequestsPerAddress = 2 });
+        alice.Sees(bob);
+        bob.Sees(alice);
+        var interruptions = 0;
+        bob.Pairing.IncomingRequest += (_, _) => Interlocked.Increment(ref interruptions);
+
+        for (var i = 0; i < 2; i++)
+        {
+            await alice.Pairing.StartAsync(bob.Id);
+            await WaitUntil(() => bob.Pairing.Current is { Stage: PairingStage.Comparing });
+            alice.Pairing.Cancel();
+            await WaitUntil(() => bob.Pairing.Current is { IsActive: false });
+        }
+
+        await alice.Pairing.StartAsync(bob.Id);
+
+        await WaitUntil(() => alice.Pairing.Current is { IsActive: false });
+        Assert.Contains("too many", alice.Pairing.Current!.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, Volatile.Read(ref interruptions));
+    }
+
+    [Fact]
     public async Task ApprovalOnOneSideOnly_PairsNeither()
     {
         var (alice, bob) = await TwoNodesAsync();
@@ -186,7 +211,7 @@ public sealed class PairingServiceTests : IAsyncLifetime
         return (alice, bob);
     }
 
-    private async Task<Node> StartAsync(string username)
+    private async Task<Node> StartAsync(string username, PairingOptions? options = null)
     {
         var store = new DeviceIdentityStore(Path.Combine(_root, Guid.NewGuid().ToString("N")));
         store.LoadOrCreate(username);
@@ -195,7 +220,7 @@ public sealed class PairingServiceTests : IAsyncLifetime
         var connections = new ConnectionManager(store, store, new StaticInterfaces(), registry, trust,
             new ConnectionOptions { Port = 0, AppVersion = "0.4.0", MaintenanceInterval = TimeSpan.FromMilliseconds(20) },
             TimeProvider.System, NullLogger<ConnectionManager>.Instance);
-        var pairing = new PairingService(connections, trust, registry, store, store, new PairingOptions(), TimeProvider.System, NullLogger<PairingService>.Instance);
+        var pairing = new PairingService(connections, trust, registry, store, store, options ?? new PairingOptions(), TimeProvider.System, NullLogger<PairingService>.Instance);
 
         var node = new Node(store, registry, trust, connections, pairing);
         _nodes.Add(node);

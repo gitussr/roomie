@@ -884,7 +884,16 @@ Rules:
 
 **One change from the table above.** A message at a higher version from a device that isn't a member at the local version isn't stored. It gets `MEMBERSHIP_UPDATING`, and the sender retries. Storing it would let a removed member keep posting just by claiming a higher version, since nothing would ever disprove it. A genuine new member's message arrives once the signed state does. A higher version from a current member is stored and marked as the table says. The same code answers a device that accepted an invitation but hasn't received the state yet.
 
-**Not in V1.** There is no ownership transfer, and no leaving a group: only the owner can remove a member, as above. If the owner is gone for good, membership can't change. Members' names in a state are what the owner saw when they joined, and a group can't be renamed from the app.
+**Ending a group (0.15.0, capability `group-end`).**
+
+- **Deleting.** The owner signs a `GROUP_DELETE`, in its own signing domain, and every device that has it sends it to the members it knows and, on the owner, to unanswered invitations. Any device may relay it, so only the signature counts: the key saved with the group, or for a device only invited, the key its invitation was checked against. It is final: later states and invitations for that group are ignored, and an answer to an old invitation adds nobody.
+- **Leaving.** A member stops being one at once and sends `GROUP_LEAVE` to the owner on each session until the owner's removal arrives. It names only a group, so a device can only ever take itself out. The owner then removes it as usual, and can invite it back. The owner can't leave, only delete.
+- **Removing from this computer.** A group that has ended here can have its messages deleted and be taken off the list. The row stays hidden while anyone may still need telling, so deleting and clearing straight away still reaches a member who is offline.
+- **Older devices.** Nothing is sent to a device without `group-end` and nothing is thrown away, so it finds out once it updates. Until then an older owner doesn't drop a member who left, and its messages to that member fail.
+
+**Names in a state.** The owner re-signs a state when a member's name changes, so members not paired with that device see it too. A paired device's own latest name is shown ahead of the one in the state.
+
+**Not in V1.** There is no ownership transfer: if the owner is gone for good, membership can't change and the group can't be deleted, though each device can still leave. A group can't be renamed from the app.
 
 # 8. File transfer protocol
 
@@ -1101,7 +1110,7 @@ The implementation should use:
 
 Subsequent connections must validate the pinned identity and reject changes.
 
-Do not implement your own TLS or cryptographic primitives. Use .NET cryptography APIs for key generation, signatures, ECDH, HKDF, and `SslStream` for transport security. Have the handshake and pairing protocol independently security-reviewed before production release.
+Do not implement your own TLS or cryptographic primitives. Use .NET cryptography APIs for key generation, signatures, ECDH, HKDF, and `SslStream` for transport security. Have the handshake and pairing protocol independently security-reviewed before production release. For use inside one office this was set aside on 2026-11-04: see security-review.md, which also lists what Phase 11 found.
 
 # 11. Persistence requirements for identity and connections
 
@@ -1250,14 +1259,15 @@ Rules that aren't obvious from the screens:
 
 - **One copy per data folder.** A named mutex, derived from the data folder's path, keeps a second copy from sharing the database and ports. A second launch signals the first to show its window, then exits.
 - **Closing isn't exiting.** With the default setting, closing the window hides it, and Roomie keeps running for messages and files. **Exit Roomie** in the notification-area menu, signing out and shutting down all stop it properly, so the TLS key is removed from the key store (§10). A window that isn't active never counts messages as read.
-- **Notifications are balloon tips,** which Windows 10 and 11 show as ordinary notifications. Toast APIs need an installed app identity, which the portable build doesn't have. Windows reports only that the latest one was clicked, so clicking an older one in Action Center can open the wrong place or do nothing. Phase 11's MSIX package may allow real toasts.
+- **Notifications are balloon tips,** which Windows 10 and 11 show as ordinary notifications. Toast APIs need an installed app identity, which the portable build doesn't have. Windows reports only that the latest one was clicked, so clicking an older one in Action Center can open the wrong place or do nothing.
 - **Text from other devices is untrusted in notifications too.** It appears outside Roomie, so names and message text lose control characters and direction marks, go on one line, and are cut to Windows' limits. A pairing request says what the device *calls itself*, because that name isn't verified. Message text can be turned off in Settings.
 - **Nothing steals focus from the background.** A request for attention brings up a window that is open. A minimized or hidden one stays put, with a notification and a flashing taskbar button, because anyone on the network can ask to pair.
 - **What counts as news.** A burst of messages from one conversation gives one notification every 5 seconds, and none while that conversation is open and in front. Transfer news comes from comparing the open transfers before and after each change, so no way of ending can be missed. What was already open at startup isn't announced.
 - **Settings** are in `config\settings.json`, written atomically. Unlike the trust list (§11), a file that can't be read is no reason to refuse to start: Roomie uses the defaults, says so, and replaces the file on the next change.
-- **Starting with Windows** uses the per-user `Run` registry value, which needs no administrator. It holds the exe's path, so it is rewritten at each start in case a portable copy moved, and the MSIX package will need its own mechanism.
+- **Starting with Windows** uses the per-user `Run` registry value, which needs no administrator. It holds the exe's path, so it is rewritten at each start in case a portable copy moved. The MSIX package uses its execution alias instead.
 
 - **Profile pictures.** A device has a built-in avatar, its own picture, or neither, when the first letter of its name is shown. `PROFILE_UPDATE` carries `preset`, a number from 1 to 12, or `picture`, a base64 PNG, or neither to clear it. Each device sends its own when a trusted session starts, when pairing finishes on a session, and when it changes, so there is nothing to retry. It needs the `profile` capability, so a device without it is sent nothing and works as before.
+- **Names.** `PROFILE_NAME` carries a device's own name, on each trusted session and whenever it changes, to devices with the `device-name` capability. It updates the name saved for that device and nothing else, so the pin is untouched and a device that was forgotten doesn't come back. A name is a claim, as architecture.md's pairing rules say: only the fingerprint proves who a device is. Discovery packets never change a paired device's name.
 - **A picture from another device is untrusted.** It's accepted only on a trusted session, never over discovery, because anyone could otherwise show any picture under any name. It must start as a PNG of exactly 96 by 96 and be at most 40 KiB, checked before any decoder sees it, so its decoded size is known. One that still won't decode shows the first letter. Updates that change anything are limited to 10 a minute per device, because each writes to disk. Files are named by device ID, never by anything a peer sent, and forgetting a device removes its picture.
 - **An uploaded picture** is cropped to its centre, turned upright using its EXIF orientation, scaled to 96 by 96 and encoded again, carrying over only pixels, so location and other details stay behind. Files over 50 MB or 100 megapixels are refused before their pixels are decoded.
 - **The logo reveal** runs over the app, which is already started behind it, for about 2 seconds. It never delays receiving anything, any click or key skips it, and it is left out when Windows animations are off, when starting at sign-in and when the window returns from the notification area.
@@ -1266,4 +1276,8 @@ Rules that aren't obvious from the screens:
 - **Sounds** are generated as WAV data in memory, so there are no audio files to ship or license. A message sounds only when the user isn't looking at that conversation, and at most once per conversation in 5 seconds. A pairing request is limited in the same way, because anyone on the network can send one, and no two sounds start within 400 ms. Declining and canceling are silent. Sounds are silent unless Windows says it accepts notifications, which covers full-screen apps, presentations and a locked computer. Windows 10 documents no way to read Focus Assist, so Roomie reads the state the shell publishes (`WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED`). If a later Windows changes that, the only cost is a sound during Focus Assist.
 - **Animations** all go through one class, which checks the Windows setting each time, so turning animations off takes effect at once. They use render transforms and opacity, so nothing moves in the layout. Only a change seen on screen animates: opening a conversation doesn't replay its messages, and a transfer that was already finished doesn't pop its tick.
 
-**Not in V1.** No high-contrast theme yet: the custom colours ignore the Windows high-contrast setting, which Phase 11 should fix. Pasting copies files only, not images from the clipboard. A folder can't be sent without zipping it first.
+- **High contrast.** When Windows' high-contrast setting is on, every colour comes from the user's scheme, whichever theme was chosen in Settings. A state that was only a change of fill, such as the open conversation, is drawn as a line.
+
+- **The MSIX package** (`packaging\`, Phase 11) declares inbound firewall rules for UDP 45820 and TCP 45821 on private and domain networks, never public. Domain matters because office PCs joined to a domain are on that profile. It turns off Windows' redirection of registry and AppData writes, which needs build 19041, so data stays in `%LOCALAPPDATA%\Roomie`: an install picks up what a portable copy left, uninstalling keeps it, and the per-user `Run` value is real. That value points at the `roomie.exe` execution alias, because the package's own folder changes with each version. Notifications stay as balloon tips, in both builds.
+
+**Not in V1.** Pasting copies files only, not images from the clipboard. A folder can't be sent without zipping it first.

@@ -27,6 +27,21 @@ public sealed class GroupProtocolTests : IDisposable
     private Signer DeviceSigner => new(_key);
 
     [Fact]
+    public void Deletion_VerifiesOnlyForItsOwnerKey_AndCantBeMistakenForAnotherDocument()
+    {
+        var deletion = new GroupDeletion("group-1", _owner, 2, Guid.NewGuid());
+        var signed = GroupProtocol.Sign(deletion, DeviceSigner);
+        using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+
+        Assert.True(GroupProtocol.TryReadDeletion(signed, out var read));
+        Assert.Equal(deletion, read);
+        Assert.True(GroupProtocol.IsDeletionSignedBy(signed, PublicKey));
+        Assert.False(GroupProtocol.IsDeletionSignedBy(signed, Convert.ToBase64String(other.ExportSubjectPublicKeyInfo())));
+        Assert.False(GroupProtocol.IsRemovalSignedBy(signed, PublicKey));
+        Assert.False(GroupProtocol.IsStateSignedBy(signed, PublicKey));
+    }
+
+    [Fact]
     public void SignedState_ReadsBackAndVerifies()
     {
         var state = State(3);

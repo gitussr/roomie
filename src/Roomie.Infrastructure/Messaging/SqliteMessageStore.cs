@@ -18,6 +18,7 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
     private const int Outgoing = 0;
     private const int Incoming = 1;
 
+    private const string GroupColumns = "document, signature, version, is_member, deletion_document, deletion_signature, has_left, is_hidden";
     private const string MessageColumns = "message_id, peer_id, direction, content, timestamp_ms, state, failure, read_receipt_pending, group_id, membership_version";
 
     private const string InsertMessage =
@@ -135,6 +136,16 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
         ALTER TABLE file_transfers ADD COLUMN partial_path TEXT;
 
         PRAGMA user_version = 5;
+        """,
+
+        // A group can now end by deletion or by leaving, and a hidden one stays only to pass that on.
+        """
+        ALTER TABLE groups ADD COLUMN deletion_document TEXT;
+        ALTER TABLE groups ADD COLUMN deletion_signature TEXT;
+        ALTER TABLE groups ADD COLUMN has_left INTEGER NOT NULL DEFAULT 0 CHECK (has_left IN (0, 1));
+        ALTER TABLE groups ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0 CHECK (is_hidden IN (0, 1));
+
+        PRAGMA user_version = 6;
         """,
     ];
 
@@ -392,13 +403,23 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
     }
 
     public StoredGroup? GetGroup(string groupId) => Run(() => Query(
-        "SELECT document, signature, version, is_member FROM groups WHERE group_id = $group",
+        $"SELECT {GroupColumns} FROM groups WHERE group_id = $group",
         ReadGroup,
         ("$group", groupId)).SingleOrDefault());
 
-    public IReadOnlyList<StoredGroup> GetGroups() => Run(() => Query(
-        "SELECT document, signature, version, is_member FROM groups",
+    public IReadOnlyList<StoredGroup> GetGroups(bool includeHidden = false) => Run(() => Query(
+        includeHidden ? $"SELECT {GroupColumns} FROM groups" : $"SELECT {GroupColumns} FROM groups WHERE is_hidden = 0",
         ReadGroup));
+
+    public void HideGroup(string groupId) => Run(() =>
+    {
+        using var transaction = _connection.BeginTransaction();
+        Execute("DELETE FROM message_recipients WHERE message_seq IN (SELECT seq FROM messages WHERE group_id = $group)", ("$group", groupId));
+        Execute("DELETE FROM messages WHERE group_id = $group", ("$group", groupId));
+        Execute("UPDATE groups SET is_hidden = 1 WHERE group_id = $group", ("$group", groupId));
+        transaction.Commit();
+        return 0;
+    });
 
     public void SaveGroup(StoredGroup group)
     {
@@ -408,14 +429,20 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
             using var transaction = _connection.BeginTransaction();
             Execute(
                 """
-                INSERT INTO groups (group_id, document, signature, version, is_member) VALUES ($group, $document, $signature, $version, $member)
-                ON CONFLICT (group_id) DO UPDATE SET document = $document, signature = $signature, version = $version, is_member = $member
+                INSERT INTO groups (group_id, document, signature, version, is_member, deletion_document, deletion_signature, has_left, is_hidden)
+                VALUES ($group, $document, $signature, $version, $member, $deletionDocument, $deletionSignature, $left, $hidden)
+                ON CONFLICT (group_id) DO UPDATE SET document = $document, signature = $signature, version = $version, is_member = $member,
+                    deletion_document = $deletionDocument, deletion_signature = $deletionSignature, has_left = $left, is_hidden = $hidden
                 """,
                 ("$group", group.State.GroupId),
                 ("$document", group.SignedDocument.Document),
                 ("$signature", group.SignedDocument.Signature),
                 ("$version", group.Version),
-                ("$member", group.IsMember ? 1 : 0));
+                ("$member", group.IsMember ? 1 : 0),
+                ("$deletionDocument", group.Deletion?.Document),
+                ("$deletionSignature", group.Deletion?.Signature),
+                ("$left", group.HasLeft ? 1 : 0),
+                ("$hidden", group.IsHidden ? 1 : 0));
 
             var waiting = Query(
                 """
@@ -669,7 +696,14 @@ public sealed partial class SqliteMessageStore : IMessageStore, IGroupStore, IFi
     {
         var signedDocument = new SignedGroupDocument(reader.GetString(0), reader.GetString(1));
         return GroupProtocol.TryReadState(signedDocument, out var state)
-            ? new StoredGroup(signedDocument, state, reader.GetInt32(2), reader.GetInt32(3) != 0)
+            ? new StoredGroup(
+                signedDocument,
+                state,
+                reader.GetInt32(2),
+                reader.GetInt32(3) != 0,
+                reader.IsDBNull(4) ? null : new SignedGroupDocument(reader.GetString(4), reader.GetString(5)),
+                reader.GetInt32(6) != 0,
+                reader.GetInt32(7) != 0)
             : throw new FormatException("A saved group can't be read.");
     }
 

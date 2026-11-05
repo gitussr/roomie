@@ -1,7 +1,7 @@
 namespace Roomie.Core.Trust;
 
 /// <summary>A device the user has paired with. Its pinned fingerprint is the only proof of its identity.</summary>
-/// <param name="Username">The name the device announced when it was paired. Display only.</param>
+/// <param name="Username">The name the device last gave. Display only, and never proof of who it is.</param>
 public sealed record TrustedPeer(Guid DeviceId, string Username, string CertificateFingerprint, DateTimeOffset TrustedAt);
 
 /// <summary>Trusted and blocked devices (architecture.md §1.2, §3). Implementations must be thread-safe.</summary>
@@ -20,6 +20,10 @@ public interface ITrustStore
 
     /// <summary>Pins the device's fingerprint, replacing any earlier pairing with it, and unblocks it.</summary>
     void Trust(TrustedPeer peer);
+
+    /// <summary>Updates the name of a paired device. Its pin and the rest stay as they are.</summary>
+    /// <returns>Whether the name changed. False if it was the same, or the device isn't paired.</returns>
+    bool UpdateUsername(Guid deviceId, string username);
 
     /// <summary>Revokes trust. The device becomes an ordinary discovered device again.</summary>
     void Remove(Guid deviceId);
@@ -85,6 +89,29 @@ public class InMemoryTrustStore : ITrustStore
             _trusted[peer.DeviceId] = peer;
             _blocked.Remove(peer.DeviceId);
         });
+    }
+
+    public bool UpdateUsername(Guid deviceId, string username)
+    {
+        lock (_gate)
+        {
+            if (!_trusted.TryGetValue(deviceId, out var peer) || peer.Username == username)
+            {
+                return false;
+            }
+        }
+
+        var changed = false;
+        Mutate(() =>
+        {
+            // Looked up again: it may have been forgotten since, and must not come back.
+            if (_trusted.TryGetValue(deviceId, out var peer))
+            {
+                _trusted[deviceId] = peer with { Username = username };
+                changed = true;
+            }
+        });
+        return changed;
     }
 
     public void Remove(Guid deviceId) => Mutate(() => _trusted.Remove(deviceId));

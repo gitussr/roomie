@@ -1,7 +1,11 @@
 namespace Roomie.App.Services;
 
 /// <summary>An emoji to choose, with the name a screen reader says for it.</summary>
-public sealed record EmojiOption(string Glyph, string Name);
+public sealed record EmojiOption(string Glyph, string Name)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => Name;
+}
 
 /// <summary>
 /// The emoji offered next to the message box. All are single characters from Unicode 11 or earlier, so Windows 10 can

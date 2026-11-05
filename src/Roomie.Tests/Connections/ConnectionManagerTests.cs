@@ -1,7 +1,9 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging.Abstractions;
 using Roomie.Core.Connections;
 using Roomie.Core.Discovery;
@@ -204,7 +206,8 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
     [Fact]
     public async Task PeerThatGoesSilent_TimesOut()
     {
-        var bob = await StartAsync("Bob");
+        // Long enough that a busy test run can't miss the connected state before the timeout ends it.
+        var bob = await StartAsync("Bob", missedHeartbeats: 20);
         await using var raw = await RawPeer.ConnectAsync(CreateStore("Raw"), bob);
 
         await WaitUntil(() => bob.Manager.GetInfo(raw.Id).State == PeerConnectionState.ConnectedUntrusted);
@@ -509,6 +512,207 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PeerThatStopsReading_StillTimesOut()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync([], []);
+        await using var _ = raw;
+        await WaitUntil(() => bob.Manager.TryGetSession(raw.Id, out var _));
+
+        // Every heartbeat is answered, and this peer reads none of the answers. Bob's sending eventually stalls.
+        using var stop = new CancellationTokenSource();
+        var flood = Task.Run(async () =>
+        {
+            var frame = RmpFraming.Encode(RmpFrameType.Control, RmpEnvelopeCodec.Encode(
+                RmpEnvelope.Create(RmpMessageTypes.Heartbeat, raw.Id, bob.Id, DateTimeOffset.UtcNow, SessionPayloads.Empty)));
+            var burst = Enumerable.Repeat(frame, 2000).SelectMany(bytes => bytes).ToArray();
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    await raw.WriteRawAsync(burst, stop.Token);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException)
+            {
+            }
+        });
+
+        await WaitUntil(() => !bob.Manager.TryGetSession(raw.Id, out var _));
+        await stop.CancelAsync();
+        await flood;
+    }
+
+    /// <summary>
+    /// Checks the chain build itself. A full handshake can't show this: whichever side holds this certificate has
+    /// Windows build a chain for it too, and that fetch can't be told apart from the one being tested.
+    /// </summary>
+    [Fact]
+    public async Task CheckingACertificate_NeverContactsTheAddressItNames()
+    {
+        using var web = new TcpListener(IPAddress.Loopback, 0);
+        web.Start();
+        var url = $"http://127.0.0.1:{((IPEndPoint)web.LocalEndpoint).Port}/issuer-{Guid.NewGuid():N}.cer";
+        var contacted = web.AcceptTcpClientAsync();
+
+        using var issuerKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=" + Guid.NewGuid().ToString("D"), key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509AuthorityInformationAccessExtension(null, [url]));
+        var now = DateTimeOffset.UtcNow;
+        using var certificate = request.Create(new X500DistinguishedName("CN=Somewhere else"), X509SignatureGenerator.CreateForECDsa(issuerKey), now.AddHours(-1), now.AddHours(1), [1, 2, 3, 4]);
+
+        using (var chain = new X509Chain { ChainPolicy = TlsHandshake.ChainPolicy() })
+        {
+            chain.Build(certificate);
+        }
+
+        await Task.WhenAny(contacted, Task.Delay(TimeSpan.FromSeconds(1)));
+        Assert.False(contacted.IsCompleted, "Checking a peer's certificate made this computer contact an address the peer chose.");
+
+        // Windows' default does contact it, so the check above is able to fail.
+        var defaults = new X509ChainPolicy { RevocationMode = X509RevocationMode.NoCheck, UrlRetrievalTimeout = TimeSpan.FromSeconds(2) };
+        using (var chain = new X509Chain { ChainPolicy = defaults })
+        {
+            await Task.Run(() => chain.Build(certificate));
+        }
+
+        await Task.WhenAny(contacted, Task.Delay(TimeSpan.FromSeconds(3)));
+        Assert.True(contacted.IsCompleted, "The default chain policy was expected to fetch the issuer.");
+    }
+
+    [Fact]
+    public async Task UnpairedPeerSendingTooMuch_IsDisconnected()
+    {
+        var bob = await StartAsync("Bob", maxUntrustedMessages: 5);
+        await using var raw = await RawPeer.ConnectAsync(CreateStore("Raw"), bob);
+        await WaitUntil(() => bob.Manager.TryGetSession(raw.Id, out var _));
+
+        for (var i = 0; i < 6; i++)
+        {
+            await raw.SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.Empty);
+        }
+
+        Assert.Equal(RmpErrorCodes.RateLimited, (await ReadErrorAsync(raw)).Code);
+        await WaitUntil(() => !bob.Manager.TryGetSession(raw.Id, out var _));
+    }
+
+    [Fact]
+    public async Task PairedPeerIsNotLimitedLikeAnUnpairedOne()
+    {
+        var bob = await StartAsync("Bob", maxUntrustedMessages: 5);
+        var store = CreateStore("Raw");
+        bob.Trust.Trust(new TrustedPeer(store.Identity.DeviceId, "Raw", store.Identity.CertificateFingerprint, DateTimeOffset.UtcNow));
+        await using var raw = await RawPeer.ConnectAsync(store, bob);
+
+        for (var i = 0; i < 20; i++)
+        {
+            await raw.SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.Empty);
+            await raw.ReadUntilAsync(RmpMessageTypes.HeartbeatAck);
+        }
+
+        Assert.True(bob.Manager.TryGetSession(raw.Id, out var _));
+    }
+
+    [Fact]
+    public async Task EndlessErrorReports_CloseTheSession()
+    {
+        var (bob, raw) = await TrustedRawPeerAsync([], [], maxRejected: 3);
+        await using var _ = raw;
+        await WaitUntil(() => bob.Manager.TryGetSession(raw.Id, out var _));
+
+        // Each report is written to the log, so unlimited ones would push everything useful out of it.
+        for (var i = 0; i < 7; i++)
+        {
+            await raw.SendAsync(RmpMessageTypes.Error, SessionPayloads.ToElement(new ErrorPayload(RmpErrorCodes.InternalError, "Line one\r\n[FAKE LOG LINE]")));
+        }
+
+        Assert.Equal(RmpErrorCodes.RateLimited, (await ReadErrorAsync(raw)).Code);
+        await WaitUntil(() => !bob.Manager.TryGetSession(raw.Id, out var _));
+    }
+
+    [Fact]
+    public async Task OneAddress_CantFillEveryUnpairedSession()
+    {
+        // These peers send no heartbeats, and must still be connected when the third one arrives.
+        var bob = await StartAsync("Bob", missedHeartbeats: 600);
+        await using var first = await RawPeer.ConnectAsync(CreateStore("One"), bob);
+        await using var second = await RawPeer.ConnectAsync(CreateStore("Two"), bob);
+        await WaitUntil(() => bob.Manager.TryGetSession(first.Id, out var _) && bob.Manager.TryGetSession(second.Id, out var _));
+
+        await using var third = await RawPeer.ConnectUnfinishedAsync(CreateStore("Three"), bob, new HelloPayload(1, 1, "0.3.0", []));
+
+        Assert.Equal(RmpErrorCodes.RateLimited, (await ReadErrorAsync(third)).Code);
+        Assert.False(bob.Manager.TryGetSession(third.Id, out var _));
+    }
+
+    [Fact]
+    public async Task ReconnectingDevice_DoesNotCountAgainstItsOwnAddressLimit()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob", missedHeartbeats: 600);
+        await using var first = await RawPeer.ConnectAsync(CreateStore("One"), bob);
+        await WaitUntil(() => bob.Manager.TryGetSession(first.Id, out var _));
+        alice.Sees(bob);
+
+        await alice.Manager.ConnectAsync(bob.Id);
+        await WaitUntil(() => bob.Manager.TryGetSession(alice.Id, out var _));
+
+        // Alice opening a second connection replaces her first, and is not a third device.
+        Assert.True(alice.Manager.TryGetSession(bob.Id, out var existing));
+        await existing.DisposeAsync();
+        await WaitUntil(() => !alice.Manager.GetInfo(bob.Id).IsConnected);
+        var again = await alice.Manager.ConnectAsync(bob.Id);
+        Assert.True(again.IsConnected, again.LastError);
+    }
+
+    [Fact]
+    public async Task AfterAnIdentityWarning_APairedDeviceIsStillDialled()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        alice.Sees(bob);
+        bob.Sees(alice);
+
+        // Anyone can connect claiming a paired device's ID. That has to warn, and mustn't cut Bob off from the real one.
+        bob.Trust.Trust(new TrustedPeer(alice.Id, "Alice", "SHA256:" + new string('A', 64), DateTimeOffset.UtcNow));
+        await alice.Manager.ConnectAsync(bob.Id);
+        await WaitUntil(() => bob.Manager.GetInfo(alice.Id).State == PeerConnectionState.IdentityMismatch);
+
+        bob.Trusts(alice);
+
+        await WaitUntil(() => bob.Manager.GetInfo(alice.Id).State == PeerConnectionState.ConnectedTrusted);
+    }
+
+    [Fact]
+    public async Task WhileTheIdentityIsStillWrong_TheWarningStays()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        bob.Sees(alice);
+        bob.Trust.Trust(new TrustedPeer(alice.Id, "Alice", "SHA256:" + new string('A', 64), DateTimeOffset.UtcNow));
+        await bob.Manager.ConnectAsync(alice.Id);
+        Assert.Equal(PeerConnectionState.IdentityMismatch, bob.Manager.GetInfo(alice.Id).State);
+
+        var states = new List<PeerConnectionState>();
+        bob.Manager.Changed += (_, _) =>
+        {
+            lock (states)
+            {
+                states.Add(bob.Manager.GetInfo(alice.Id).State);
+            }
+        };
+
+        await Task.Delay(800);
+
+        lock (states)
+        {
+            Assert.All(states, state => Assert.Equal(PeerConnectionState.IdentityMismatch, state));
+        }
+
+        Assert.Contains("different identity", bob.Manager.GetInfo(alice.Id).LastError, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Send_RefusesWhatTheOtherSideWouldHaveToRefuse()
     {
         var bob = await StartAsync("Bob", ["text"]);
@@ -562,7 +766,7 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
         return store;
     }
 
-    private async Task<Node> StartAsync(string username, IReadOnlyList<string>? capabilities = null, int maxRejected = 30)
+    private async Task<Node> StartAsync(string username, IReadOnlyList<string>? capabilities = null, int maxRejected = 30, int maxUntrustedMessages = 100_000, int missedHeartbeats = 3)
     {
         var store = CreateStore(username);
         var registry = new PeerRegistry(TimeSpan.FromMinutes(1));
@@ -573,8 +777,9 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
             AppVersion = "0.3.0",
             Capabilities = capabilities ?? [],
             MaxRejectedMessagesPerMinute = maxRejected,
+            MaxUntrustedMessagesPerMinute = maxUntrustedMessages,
             HeartbeatInterval = TimeSpan.FromMilliseconds(100),
-            MissedHeartbeatThreshold = 3,
+            MissedHeartbeatThreshold = missedHeartbeats,
             ReconnectDelays = [TimeSpan.FromMilliseconds(50)],
             LargerIdDialDelay = TimeSpan.FromMilliseconds(500),
             MaintenanceInterval = TimeSpan.FromMilliseconds(20),
@@ -684,10 +889,10 @@ public sealed class ConnectionManagerTests : IAsyncLifetime
             return envelope.MessageId;
         }
 
-        public async Task WriteRawAsync(byte[] data)
+        public async Task WriteRawAsync(byte[] data, CancellationToken cancellationToken = default)
         {
-            await ssl.WriteAsync(data);
-            await ssl.FlushAsync();
+            await ssl.WriteAsync(data, cancellationToken);
+            await ssl.FlushAsync(cancellationToken);
         }
 
         public async Task<RmpEnvelope> ReadUntilAsync(string type)

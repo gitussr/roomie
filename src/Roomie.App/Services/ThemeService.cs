@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 using Microsoft.Win32;
 using Roomie.Core.Configuration;
 
@@ -23,6 +24,7 @@ public sealed partial class ThemeService : IDisposable
     {
         _application = application;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        SystemParameters.StaticPropertyChanged += OnSystemParameterChanged;
     }
 
     /// <summary>The colours changed, so window title bars need to follow.</summary>
@@ -33,6 +35,16 @@ public sealed partial class ThemeService : IDisposable
     public void Apply(ThemeChoice choice)
     {
         _choice = choice;
+
+        // Whichever colours were chosen: someone who turned this on in Windows needs it everywhere.
+        if (IsHighContrast)
+        {
+            IsDark = Luminance(SystemColors.WindowColor) < 0.5;
+            _application.Resources.MergedDictionaries[0] = CreateHighContrast();
+            Changed?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
         var dark = choice switch
         {
             ThemeChoice.Dark => true,
@@ -63,13 +75,79 @@ public sealed partial class ThemeService : IDisposable
         }
     }
 
-    public void Dispose() => SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+    public void Dispose()
+    {
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
+    }
+
+    private static bool IsHighContrast => SystemParameters.HighContrast;
+
+    /// <summary>
+    /// Every colour comes from the scheme the user picked in Windows. Backgrounds are all one colour, as such schemes
+    /// expect, so a state that was only a change of fill is drawn as a line instead (<c>RowLineBrush</c>).
+    /// </summary>
+    private static ResourceDictionary CreateHighContrast()
+    {
+        var background = SystemColors.WindowColor;
+        var text = SystemColors.WindowTextColor;
+        var highlight = SystemColors.HighlightColor;
+        var colors = new Dictionary<string, Color>
+        {
+            ["WindowBrush"] = background,
+            ["RailBrush"] = background,
+            ["PaneBrush"] = background,
+            ["RaisedBrush"] = background,
+            ["SubtleBrush"] = background,
+            ["HoverBrush"] = background,
+            ["SelectedBrush"] = background,
+            ["MineBubbleBrush"] = background,
+            ["TheirBubbleBrush"] = background,
+            ["NoticeBrush"] = background,
+            ["ScrimBrush"] = background,
+            ["LineBrush"] = text,
+            ["ControlLineBrush"] = text,
+            ["TextBrush"] = text,
+            ["MutedTextBrush"] = text,
+            ["ProblemBrush"] = text,
+            ["SuccessBrush"] = text,
+            ["OnlineBrush"] = text,
+            ["DisabledTextBrush"] = SystemColors.GrayTextColor,
+            ["OfflineBrush"] = SystemColors.GrayTextColor,
+            ["AccentBrush"] = highlight,
+            ["AccentHoverBrush"] = highlight,
+            ["OnAccentBrush"] = SystemColors.HighlightTextColor,
+            ["RowLineBrush"] = highlight,
+        };
+
+        var dictionary = new ResourceDictionary { ["HoverLineThickness"] = new Thickness(2) };
+        foreach (var (key, color) in colors)
+        {
+            var brush = new SolidColorBrush(color);
+            brush.Freeze();
+            dictionary[key] = brush;
+        }
+
+        return dictionary;
+    }
+
+    private static double Luminance(Color color) => ((0.2126 * color.R) + (0.7152 * color.G) + (0.0722 * color.B)) / 255;
+
+    private void OnSystemParameterChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SystemParameters.HighContrast))
+        {
+            _application.Dispatcher.BeginInvoke(() => Apply(_choice));
+        }
+    }
 
     private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
     {
-        if (e.Category == UserPreferenceCategory.General && _choice == ThemeChoice.System)
+        // Going from one high-contrast scheme to another changes only the colours.
+        var followsWindows = e.Category == UserPreferenceCategory.General && _choice == ThemeChoice.System;
+        if (followsWindows || (e.Category == UserPreferenceCategory.Color && IsHighContrast))
         {
-            _application.Dispatcher.BeginInvoke(() => Apply(ThemeChoice.System));
+            _application.Dispatcher.BeginInvoke(() => Apply(_choice));
         }
     }
 

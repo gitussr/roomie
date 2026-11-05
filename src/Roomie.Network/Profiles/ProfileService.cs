@@ -8,8 +8,8 @@ using Roomie.Network.Connections;
 namespace Roomie.Network.Profiles;
 
 /// <summary>
-/// Exchanges pictures between paired devices (architecture.md §15). Each side sends its own whenever a trusted
-/// session starts or the picture changes, so there's nothing to retry: a device that missed one gets it next time.
+/// Exchanges pictures and names between paired devices (architecture.md §15). Each side sends its own whenever a
+/// trusted session starts or they change, so there's nothing to retry: a device that missed one gets it next time.
 /// Never over UDP: discovery is unauthenticated, and anyone could otherwise show any picture under any name.
 /// </summary>
 public sealed partial class ProfileService : IDisposable
@@ -36,7 +36,7 @@ public sealed partial class ProfileService : IDisposable
         _time = time;
         _logger = logger;
 
-        _registration = connections.Dispatcher.Register([RmpMessageTypes.ProfileUpdate], HandleMessageAsync);
+        _registration = connections.Dispatcher.Register([RmpMessageTypes.ProfileUpdate, RmpMessageTypes.ProfileName], HandleMessageAsync);
         connections.SessionOpened += OnSessionReady;
         connections.SessionTrusted += OnSessionReady;
         trust.Changed += OnTrustChanged;
@@ -76,6 +76,18 @@ public sealed partial class ProfileService : IDisposable
         return true;
     }
 
+    /// <summary>Tells the devices connected now this device's name. Call after it changes.</summary>
+    public void AnnounceOwnName()
+    {
+        foreach (var info in _connections.Snapshot().Where(c => c.IsConnected))
+        {
+            if (_connections.TryGetSession(info.DeviceId, out var session))
+            {
+                _ = SendOwnNameAsync(session);
+            }
+        }
+    }
+
     public void Dispose()
     {
         _registration.Dispose();
@@ -89,6 +101,7 @@ public sealed partial class ProfileService : IDisposable
         if (session.IsTrusted)
         {
             _ = SendOwnAsync(session, Own);
+            _ = SendOwnNameAsync(session);
         }
     }
 
@@ -118,9 +131,53 @@ public sealed partial class ProfileService : IDisposable
         }
     }
 
+    private async Task SendOwnNameAsync(PeerSession session)
+    {
+        if (!session.IsTrusted || !session.Supports(RmpCapabilities.DeviceName))
+        {
+            return;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(SendTimeout);
+            var payload = new ProfileNamePayload(_identity.Identity.Username);
+            await session.SendAsync(RmpMessageTypes.ProfileName, SessionPayloads.ToElement(payload), timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or OperationCanceledException)
+        {
+            // The next session sends it again.
+            LogNameSendFailed(_logger, session.RemoteDeviceId, ex.Message);
+        }
+    }
+
+    private void OnName(Guid peerId, ProfileNamePayload update)
+    {
+        // Checked before the limit: every session sends a name, and most of the time nothing changed.
+        if (_trust.FindTrusted(peerId) is not { } peer || peer.Username == update.Username || !IsWithinLimit(peerId))
+        {
+            return;
+        }
+
+        try
+        {
+            _trust.UpdateUsername(peerId, update.Username);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogSaveFailed(_logger, peerId, ex.Message);
+        }
+    }
+
     private ValueTask HandleMessageAsync(PeerSession session, RmpEnvelope message, CancellationToken cancellationToken)
     {
         var peerId = session.RemoteDeviceId;
+        if (message.Type == RmpMessageTypes.ProfileName)
+        {
+            OnName(peerId, SessionPayloads.TryDeserialize<ProfileNamePayload>(message.Payload)!);
+            return ValueTask.CompletedTask;
+        }
+
         if (SessionPayloads.TryDeserialize<ProfileUpdatePayload>(message.Payload) is not { } update
             || !ProfileProtocol.TryRead(update, out var choice)
             || !IsWithinLimit(peerId)
@@ -170,6 +227,9 @@ public sealed partial class ProfileService : IDisposable
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Couldn't save the picture of {DeviceId}: {Reason}")]
     private static partial void LogSaveFailed(ILogger logger, Guid deviceId, string reason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Couldn't send this device's name to {DeviceId}: {Reason}")]
+    private static partial void LogNameSendFailed(ILogger logger, Guid deviceId, string reason);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Couldn't send this device's picture to {DeviceId}: {Reason}")]
     private static partial void LogSendFailed(ILogger logger, Guid deviceId, string reason);

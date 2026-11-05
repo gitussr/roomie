@@ -369,6 +369,86 @@ public sealed class ProfileTests : IDisposable
         Assert.Equal(9, bob.Store.Load(bob.Id).Preset);
     }
 
+    // ---- Names ----
+
+    [Fact]
+    public async Task AName_ReachesAPairedDevice_WhenItConnects_AndChangesFollow_WithThePinUntouched()
+    {
+        IReadOnlyList<string> capabilities = [RmpCapabilities.Text, RmpCapabilities.DeviceName];
+        await using var alice = await StartAsync("Alice", capabilities);
+        await using var bob = await StartAsync("Bob", capabilities);
+        Pair(alice, bob);
+        var pin = bob.Trust.FindTrusted(alice.Id)!.CertificateFingerprint;
+
+        await ConnectAsync(alice, bob);
+        await WaitUntil(() => bob.Trust.FindTrusted(alice.Id)!.Username == "Alice");
+
+        alice.Identity.ChangeUsername("Alicia");
+        alice.Profiles.AnnounceOwnName();
+        await WaitUntil(() => bob.Trust.FindTrusted(alice.Id)!.Username == "Alicia");
+
+        Assert.Equal(pin, bob.Trust.FindTrusted(alice.Id)!.CertificateFingerprint);
+        Assert.Equal(PeerConnectionState.ConnectedTrusted, bob.Connections.GetInfo(alice.Id).State);
+    }
+
+    [Fact]
+    public async Task ADeviceWithoutTheNameFeature_IsSentNoName_AndStaysConnected()
+    {
+        await using var alice = await StartAsync("Alice", [RmpCapabilities.Text, RmpCapabilities.DeviceName]);
+        await using var old = await StartAsync("Old", [RmpCapabilities.Text]);
+        Pair(alice, old);
+
+        await ConnectAsync(alice, old);
+        alice.Profiles.AnnounceOwnName();
+        await Task.Delay(300);
+
+        Assert.Equal("A", old.Trust.FindTrusted(alice.Id)!.Username);
+        Assert.Equal(PeerConnectionState.ConnectedTrusted, alice.Connections.GetInfo(old.Id).State);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(" Padded ")]
+    [InlineData("Two\nLines")]
+    public void AName_NotInItsNormalForm_IsRefused(string name)
+    {
+        var payload = SessionPayloads.ToElement(new ProfileNamePayload(name));
+
+        Assert.Equal(RmpPayloadCheck.Malformed, ProfileProtocol.CheckName(payload));
+    }
+
+    [Fact]
+    public void AName_IsRefusedBeforePairing()
+    {
+        var payload = SessionPayloads.ToElement(new ProfileNamePayload("Alice"));
+
+        Assert.Equal(RmpPayloadCheck.Valid, ProfileProtocol.CheckName(payload));
+        Assert.NotNull(RmpMessagePolicy.Check(RmpMessageTypes.ProfileName, payload, isTrusted: false, new HashSet<string> { RmpCapabilities.DeviceName }));
+        Assert.Null(RmpMessagePolicy.Check(RmpMessageTypes.ProfileName, payload, isTrusted: true, new HashSet<string> { RmpCapabilities.DeviceName }));
+    }
+
+    [Fact]
+    public void UpdatingAName_NeverBringsBackAForgottenDevice_OrUnblocksOne()
+    {
+        var trust = new InMemoryTrustStore();
+        var id = Guid.NewGuid();
+        trust.Trust(new TrustedPeer(id, "Old", "SHA256:AA", DateTimeOffset.UtcNow));
+
+        Assert.False(trust.UpdateUsername(id, "Old"));
+        Assert.True(trust.UpdateUsername(id, "New"));
+        Assert.Equal("New", trust.FindTrusted(id)!.Username);
+
+        trust.Remove(id);
+        Assert.False(trust.UpdateUsername(id, "Newer"));
+        Assert.Null(trust.FindTrusted(id));
+
+        trust.Trust(new TrustedPeer(id, "Old", "SHA256:AA", DateTimeOffset.UtcNow));
+        trust.Block(id);
+        Assert.False(trust.UpdateUsername(id, "Newer"));
+        Assert.True(trust.IsBlocked(id));
+    }
+
     private static void Pair(ProfileNode a, ProfileNode b)
     {
         a.Trust.Trust(new TrustedPeer(b.Id, "B", b.Identity.Identity.CertificateFingerprint, DateTimeOffset.UtcNow));

@@ -471,8 +471,14 @@ public sealed partial class ConnectionManager : BackgroundService
             }
 
             state.Connecting = true;
-            state.State = PeerConnectionState.Connecting;
-            state.LastError = null;
+
+            // A retry by itself leaves a warning showing until the identity is actually right.
+            if (!automatic || state.State != PeerConnectionState.IdentityMismatch)
+            {
+                state.State = PeerConnectionState.Connecting;
+                state.LastError = null;
+            }
+
             if (!automatic)
             {
                 state.ManualDisconnect = false;
@@ -510,13 +516,16 @@ public sealed partial class ConnectionManager : BackgroundService
             {
                 var state = GetOrCreate(deviceId);
                 state.Connecting = false;
-                if (lastError is not null && state.Session is null
-                    && state.State is not (PeerConnectionState.IdentityMismatch or PeerConnectionState.Blocked))
+                if (lastError is not null && state.Session is null)
                 {
-                    var trusted = _trust.FindTrusted(deviceId) is not null;
-                    state.State = trusted && !state.ManualDisconnect ? PeerConnectionState.Reconnecting : PeerConnectionState.Failed;
-                    state.LastError = lastError;
-                    state.ChangedAt = _time.GetUtcNow();
+                    if (state.State is not (PeerConnectionState.IdentityMismatch or PeerConnectionState.Blocked))
+                    {
+                        var trusted = _trust.FindTrusted(deviceId) is not null;
+                        state.State = trusted && !state.ManualDisconnect ? PeerConnectionState.Reconnecting : PeerConnectionState.Failed;
+                        state.LastError = lastError;
+                        state.ChangedAt = _time.GetUtcNow();
+                    }
+
                     if (automatic)
                     {
                         state.FailedAttempts++;
@@ -620,7 +629,7 @@ public sealed partial class ConnectionManager : BackgroundService
             }
 
             var trusted = pinned is not null;
-            var refusal = CheckCapacity(peer, trusted);
+            var refusal = CheckCapacity(peer, trusted, remote.Address);
             if (refusal is not null)
             {
                 await RejectAsync(ssl, RmpMessageTypes.Error, SessionPayloads.ToElement(new ErrorPayload(refusal.Value.Code, refusal.Value.Message)), localId, peer.DeviceId).ConfigureAwait(false);
@@ -670,7 +679,7 @@ public sealed partial class ConnectionManager : BackgroundService
         }
     }
 
-    private (string Code, string Message)? CheckCapacity(RemoteDeviceCertificate peer, bool trusted)
+    private (string Code, string Message)? CheckCapacity(RemoteDeviceCertificate peer, bool trusted, IPAddress address)
     {
         lock (_gate)
         {
@@ -691,6 +700,12 @@ public sealed partial class ConnectionManager : BackgroundService
             if (!trusted && sessions.Count(d => d.Session!.IsTrusted == false) >= _options.MaxUntrustedSessions)
             {
                 return (RmpErrorCodes.RateLimited, "Too many connections from unpaired devices.");
+            }
+
+            // A device connecting again replaces its own session, so it doesn't count against itself.
+            if (!trusted && sessions.Count(d => !d.Session!.IsTrusted && d.DeviceId != peer.DeviceId && d.Session.RemoteEndPoint.Address.Equals(address)) >= _options.MaxUntrustedSessionsPerAddress)
+            {
+                return (RmpErrorCodes.RateLimited, "Too many connections from unpaired devices at that address.");
             }
 
             return null;
@@ -859,7 +874,9 @@ public sealed partial class ConnectionManager : BackgroundService
                 }
 
                 var state = GetOrCreate(peer.DeviceId);
-                if (state.Session is not null || state.Connecting || state.ManualDisconnect || state.State == PeerConnectionState.IdentityMismatch)
+                // An identity warning doesn't stop this. Anyone can connect claiming a paired device's ID, and giving
+                // up on the real device would hand them an easy way to cut it off. Each dial still checks the pin.
+                if (state.Session is not null || state.Connecting || state.ManualDisconnect)
                 {
                     continue;
                 }
@@ -928,7 +945,7 @@ public sealed partial class ConnectionManager : BackgroundService
         lock (_gate)
         {
             var state = GetOrCreate(deviceId);
-            if (state.Session is null)
+            if (state.Session is null && state.State != PeerConnectionState.IdentityMismatch)
             {
                 state.State = PeerConnectionState.Authenticating;
             }

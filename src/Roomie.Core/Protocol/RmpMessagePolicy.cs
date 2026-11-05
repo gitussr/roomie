@@ -17,6 +17,10 @@ public static class RmpCapabilities
     public const string FileTransfer = "file-transfer-2";
 
     public const string Profile = "profile";
+
+    // Separate from "groups" and "profile", so an older device simply isn't sent these until it updates.
+    public const string GroupEnd = "group-end";
+    public const string DeviceName = "device-name";
 }
 
 /// <summary>What was agreed for one session: the intersection of what both sides advertised in <c>HELLO</c>.</summary>
@@ -95,6 +99,8 @@ public static class RmpMessagePolicy
         new(RmpMessageTypes.GroupRemove, 2 * Small, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckRemoval),
         new(RmpMessageTypes.GroupState, Frame, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckState),
         new(RmpMessageTypes.GroupStateRequest, Small, RequiredCapability: RmpCapabilities.Groups, Validate: GroupProtocol.CheckStateRequest),
+        new(RmpMessageTypes.GroupDelete, 2 * Small, RequiredCapability: RmpCapabilities.GroupEnd, Validate: GroupProtocol.CheckDeletion),
+        new(RmpMessageTypes.GroupLeave, Small, RequiredCapability: RmpCapabilities.GroupEnd, Validate: GroupProtocol.CheckLeave),
 
         new(RmpMessageTypes.FileOffer, Metadata, RequiredCapability: RmpCapabilities.FileTransfer, Validate: ContentPayloads.CheckFileOffer),
         new(RmpMessageTypes.FileAccept, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckAccept),
@@ -105,6 +111,7 @@ public static class RmpMessagePolicy
         new(RmpMessageTypes.FileAck, Small, RequiredCapability: RmpCapabilities.FileTransfer, Validate: FilePayloads.CheckAck),
 
         new(RmpMessageTypes.ProfileUpdate, Frame, RequiredCapability: RmpCapabilities.Profile, Validate: ProfileProtocol.CheckUpdate),
+        new(RmpMessageTypes.ProfileName, Small, RequiredCapability: RmpCapabilities.DeviceName, Validate: ProfileProtocol.CheckName),
     }.ToDictionary(spec => spec.Type, StringComparer.Ordinal);
 
     public static IEnumerable<string> KnownTypes => Specs.Keys;

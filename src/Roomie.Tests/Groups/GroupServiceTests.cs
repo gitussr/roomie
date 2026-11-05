@@ -747,6 +747,276 @@ public sealed class GroupServiceTests : IAsyncLifetime
 
     // ---- Harness ----
 
+    // ---- Deleting ----
+
+    [Fact]
+    public async Task OwnerDeleting_EndsTheGroupForEveryone_AndHistoryStaysUntilRemoved()
+    {
+        var (alice, bob, charlie) = await MeshAsync();
+        var groupId = await GroupOfAsync(alice, bob, charlie);
+        var sent = alice.Messaging.SendGroupText(groupId, "Before").Message!;
+        await WaitUntil(() => bob.Store.GetGroupConversation(groupId).Any(m => m.MessageId == sent.MessageId));
+
+        Assert.Null(alice.Groups.Delete(groupId).Error);
+
+        await WaitUntil(() => new[] { alice, bob, charlie }.All(n => n.Groups.GetGroup(groupId) is { IsMember: false, IsDeleted: true }));
+        foreach (var node in new[] { alice, bob, charlie })
+        {
+            Assert.NotNull(node.Messaging.SendGroupText(groupId, "After").Error);
+            Assert.Contains(node.Groups.GetGroups(), g => g.State.GroupId == groupId);
+        }
+
+        Assert.Single(bob.Store.GetGroupConversation(groupId));
+        Assert.Null(bob.Groups.RemoveFromThisComputer(groupId).Error);
+        Assert.Empty(bob.Store.GetGroupConversation(groupId));
+        Assert.DoesNotContain(bob.Groups.GetGroups(), g => g.State.GroupId == groupId);
+    }
+
+    [Fact]
+    public async Task Deleting_ReachesAMemberThroughAnotherMember_WhileTheOwnerCantReachIt()
+    {
+        var (alice, bob, charlie) = await MeshAsync();
+        var groupId = await GroupOfAsync(alice, bob, charlie);
+        await alice.Connections.DisconnectAsync(charlie.Id);
+        await WaitUntil(() => alice.Connections.GetInfo(charlie.Id).State != PeerConnectionState.ConnectedTrusted);
+
+        alice.Groups.Delete(groupId);
+
+        await WaitUntil(() => charlie.Groups.GetGroup(groupId) is { IsDeleted: true });
+    }
+
+    [Fact]
+    public async Task OwnerRemovingADeletedGroup_StillTellsADeviceThatWasOffline_AfterARestart()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
+        var groupId = await GroupOfAsync(alice, bob);
+        await alice.Connections.DisconnectAsync(bob.Id);
+        await WaitUntil(() => alice.Connections.GetInfo(bob.Id).State != PeerConnectionState.ConnectedTrusted);
+
+        alice.Groups.Delete(groupId);
+        alice.Groups.RemoveFromThisComputer(groupId);
+        Assert.Empty(alice.Groups.GetGroups());
+        alice = await RestartAsync(alice);
+        Assert.Empty(alice.Groups.GetGroups());
+        Assert.False(bob.Groups.GetGroup(groupId)!.IsDeleted);
+
+        await ConnectAsync(alice, bob);
+
+        await WaitUntil(() => bob.Groups.GetGroup(groupId) is { IsDeleted: true });
+    }
+
+    [Fact]
+    public async Task Deleting_ClosesAnInvitationNotYetAnswered_AndAnAnswerCantJoin()
+    {
+        var (alice, bob, _) = await MeshAsync();
+        var groupId = alice.Groups.CreateGroup("Team").GroupId!;
+        alice.Groups.Invite(groupId, bob.Id);
+        await WaitUntil(() => bob.OpenInvite(groupId) is not null);
+
+        alice.Groups.Delete(groupId);
+
+        await WaitUntil(() => bob.OpenInvite(groupId) is null);
+        Assert.Null(bob.Groups.GetGroup(groupId));
+        Assert.NotNull(bob.Groups.RespondToInvite(groupId, alice.Id, accept: true).Error);
+        Assert.False(alice.Groups.GetGroup(groupId)!.State.HasMember(bob.Id));
+    }
+
+    [Fact]
+    public async Task AnAnswerArrivingAfterDeletion_DoesntAddTheDevice()
+    {
+        var alice = await StartAsync("Alice");
+        var peer = await RawPeerAsync(alice, "Late", [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.GroupEnd]);
+        _cleanup.Add(peer);
+        var groupId = alice.Groups.CreateGroup("Team").GroupId!;
+        alice.Groups.Invite(groupId, peer.Id);
+        var invite = SessionPayloads.TryDeserialize<GroupInvitePayload>((await peer.ReadUntilAsync(RmpMessageTypes.GroupInvite)).Payload)!;
+
+        alice.Groups.Delete(groupId);
+        await peer.ReadUntilAsync(RmpMessageTypes.GroupDelete);
+        await peer.SendAsync(RmpMessageTypes.GroupAccept, SessionPayloads.ToElement(new GroupAcceptPayload(groupId, invite.InviteId, true)));
+        await peer.RoundTripAsync();
+
+        Assert.False(alice.Groups.GetGroup(groupId)!.State.HasMember(peer.Id));
+        Assert.True(alice.Groups.GetGroup(groupId)!.IsDeleted);
+    }
+
+    [Fact]
+    public async Task ADeletionNotSignedByTheOwner_IsIgnored()
+    {
+        var raw = await RawGroupAsync();
+        var forger = await RawPeerAsync(raw.Bob, "Forger", [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.GroupEnd]);
+        _cleanup.Add(forger);
+
+        var forged = GroupProtocol.Sign(new GroupDeletion(raw.GroupId, raw.Owner.Id, 3, Guid.NewGuid()), forger.Identity);
+        await forger.SendAsync(RmpMessageTypes.GroupDelete, SessionPayloads.ToElement(forged));
+        await forger.RoundTripAsync();
+
+        Assert.False(raw.Bob.Groups.GetGroup(raw.GroupId)!.IsDeleted);
+        Assert.True(raw.Bob.Groups.GetGroup(raw.GroupId)!.IsMember);
+    }
+
+    [Fact]
+    public async Task OnlyTheOwnerDeletes_OnlyMembersLeave_AndADeletedGroupCantChange()
+    {
+        var (alice, bob, charlie) = await MeshAsync();
+        var groupId = await GroupOfAsync(alice, bob);
+
+        Assert.NotNull(bob.Groups.Delete(groupId).Error);
+        Assert.NotNull(alice.Groups.Leave(groupId).Error);
+        Assert.NotNull(alice.Groups.RemoveFromThisComputer(groupId).Error);
+        Assert.True(alice.Groups.GetGroup(groupId)!.IsMember);
+
+        alice.Groups.Delete(groupId);
+        Assert.NotNull(alice.Groups.Invite(groupId, charlie.Id).Error);
+        Assert.NotNull(alice.Groups.Remove(groupId, bob.Id).Error);
+        Assert.NotNull(alice.Groups.Delete(groupId).Error);
+    }
+
+    [Fact]
+    public async Task ADeviceWithoutTheFeature_IsNotSentADeletion()
+    {
+        var alice = await StartAsync("Alice");
+        var peer = await RawPeerAsync(alice, "Old");
+        _cleanup.Add(peer);
+        var groupId = alice.Groups.CreateGroup("Team").GroupId!;
+        await JoinRawAsync(alice, groupId, peer);
+
+        alice.Groups.Delete(groupId);
+        await Task.Delay(300);
+        await peer.SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.Empty);
+
+        var seen = await peer.ReadAllUntilAsync(RmpMessageTypes.HeartbeatAck);
+        Assert.DoesNotContain(seen, m => m.Type == RmpMessageTypes.GroupDelete);
+    }
+
+    // ---- Leaving ----
+
+    [Fact]
+    public async Task MemberLeaving_IsRemovedByTheOwner_AndEveryoneElseLearnsIt()
+    {
+        var (alice, bob, charlie) = await MeshAsync();
+        var groupId = await GroupOfAsync(alice, bob, charlie);
+        var before = alice.Groups.GetGroup(groupId)!.Version;
+
+        Assert.Null(bob.Groups.Leave(groupId).Error);
+        Assert.NotNull(bob.Messaging.SendGroupText(groupId, "Still here?").Error);
+
+        await WaitUntil(() => !alice.Groups.GetGroup(groupId)!.State.HasMember(bob.Id));
+        await WaitUntil(() => !charlie.Groups.GetGroup(groupId)!.State.HasMember(bob.Id));
+        await WaitUntil(() => bob.Groups.GetGroup(groupId)!.Version == before + 1);
+        Assert.True(bob.Groups.GetGroup(groupId) is { IsMember: false, HasLeft: true });
+        Assert.True(charlie.Groups.GetGroup(groupId)!.IsMember);
+    }
+
+    [Fact]
+    public async Task Leaving_ReachesTheOwner_OnceItIsConnectedAgain()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
+        var groupId = await GroupOfAsync(alice, bob);
+        await alice.Connections.DisconnectAsync(bob.Id);
+        await WaitUntil(() => bob.Connections.GetInfo(alice.Id).State != PeerConnectionState.ConnectedTrusted);
+
+        bob.Groups.Leave(groupId);
+        bob.Groups.RemoveFromThisComputer(groupId);
+        Assert.Empty(bob.Groups.GetGroups());
+        Assert.True(alice.Groups.GetGroup(groupId)!.State.HasMember(bob.Id));
+
+        await ConnectAsync(alice, bob);
+
+        await WaitUntil(() => !alice.Groups.GetGroup(groupId)!.State.HasMember(bob.Id));
+    }
+
+    [Fact]
+    public async Task AfterLeaving_TheOwnerCanInviteThemBack()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
+        var groupId = await GroupOfAsync(alice, bob);
+        bob.Groups.Leave(groupId);
+        await WaitUntil(() => !alice.Groups.GetGroup(groupId)!.State.HasMember(bob.Id));
+        var version = alice.Groups.GetGroup(groupId)!.Version;
+        await WaitUntil(() => bob.Groups.GetGroup(groupId)!.Version == version);
+        bob.Groups.RemoveFromThisComputer(groupId);
+
+        Assert.Null(alice.Groups.Invite(groupId, bob.Id).Error);
+        await WaitUntil(() => bob.OpenInvite(groupId) is not null);
+        bob.Groups.RespondToInvite(groupId, alice.Id, accept: true);
+
+        await WaitUntil(() => bob.Groups.GetGroup(groupId) is { IsMember: true, HasLeft: false, IsHidden: false });
+        Assert.Contains(bob.Groups.GetGroups(), g => g.State.GroupId == groupId);
+    }
+
+    [Fact]
+    public async Task ALeaveMessage_OnlyEverTakesOutTheDeviceThatSentIt()
+    {
+        var alice = await StartAsync("Alice");
+        var member = await RawPeerAsync(alice, "Member", [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.GroupEnd]);
+        var outsider = await RawPeerAsync(alice, "Outsider", [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.GroupEnd]);
+        _cleanup.Add(member);
+        _cleanup.Add(outsider);
+        var groupId = alice.Groups.CreateGroup("Team").GroupId!;
+        await JoinRawAsync(alice, groupId, member);
+        var version = alice.Groups.GetGroup(groupId)!.Version;
+
+        await outsider.SendAsync(RmpMessageTypes.GroupLeave, SessionPayloads.ToElement(new GroupLeavePayload(groupId)));
+        await outsider.RoundTripAsync();
+
+        Assert.Equal(version, alice.Groups.GetGroup(groupId)!.Version);
+        Assert.True(alice.Groups.GetGroup(groupId)!.State.HasMember(member.Id));
+
+        await member.SendAsync(RmpMessageTypes.GroupLeave, SessionPayloads.ToElement(new GroupLeavePayload(groupId)));
+        await WaitUntil(() => !alice.Groups.GetGroup(groupId)!.State.HasMember(member.Id));
+        Assert.True(alice.Groups.GetGroup(groupId)!.State.HasMember(alice.Id));
+    }
+
+    // ---- Names ----
+
+    [Fact]
+    public async Task AMemberRenamed_ReachesMembersNotPairedWithIt_ThroughTheOwner()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        var charlie = await StartAsync("Charlie");
+        Pair(alice, bob);
+        Pair(alice, charlie);
+        await ConnectAsync(alice, bob);
+        await ConnectAsync(alice, charlie);
+        var groupId = await GroupOfAsync(alice, bob, charlie);
+        var before = alice.Groups.GetGroup(groupId)!.Version;
+
+        Assert.True(alice.Trust.UpdateUsername(bob.Id, "Robert"));
+
+        await WaitUntil(() => charlie.Groups.GetGroup(groupId)!.State.Members.Single(m => m.DeviceId == bob.Id).Username == "Robert");
+        Assert.Equal(before + 1, alice.Groups.GetGroup(groupId)!.Version);
+    }
+
+    [Fact]
+    public async Task TheOwnerRenamed_ReachesItsMembers_AndAnUnchangedNameChangesNothing()
+    {
+        var alice = await StartAsync("Alice");
+        var bob = await StartAsync("Bob");
+        Pair(alice, bob);
+        await ConnectAsync(alice, bob);
+        var groupId = await GroupOfAsync(alice, bob);
+        var before = alice.Groups.GetGroup(groupId)!.Version;
+
+        alice.Groups.RefreshOwnedNames();
+        Assert.Equal(before, alice.Groups.GetGroup(groupId)!.Version);
+
+        alice.Identity.ChangeUsername("Alicia");
+        alice.Groups.RefreshOwnedNames();
+
+        await WaitUntil(() => bob.Groups.GetGroup(groupId)!.State.Members.Single(m => m.DeviceId == alice.Id).Username == "Alicia");
+    }
+
     private sealed record RawGroup(Node Bob, RawPeer Owner, string GroupId, GroupState State, SignedGroupDocument Signed);
 
     /// <summary>Bob has joined a group at version 2, owned by a peer driven by hand.</summary>
@@ -876,7 +1146,7 @@ public sealed class GroupServiceTests : IAsyncLifetime
             {
                 Port = 0,
                 AppVersion = "0.8.0",
-                Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups],
+                Capabilities = [RmpCapabilities.Text, RmpCapabilities.Groups, RmpCapabilities.GroupEnd],
                 MaintenanceInterval = TimeSpan.FromMilliseconds(20),
                 ReconnectDelays = [TimeSpan.FromHours(1)],
                 LargerIdDialDelay = TimeSpan.FromHours(1),

@@ -18,7 +18,42 @@ Roomie is a peer-to-peer LAN messenger for Windows. It needs no server, internet
 - **Profile pictures and logo reveal (0.11.0).** In **Settings**, choose one of 12 built-in avatars or upload your own picture. Paired devices see it in their chats and device list. Roomie opens with a short animated logo reveal, which any click or key skips. It doesn't play when Roomie starts by itself at sign-in or when the window comes back from the notification area, or if animations are off in Windows. Details are in architecture.md §15.
 - **First-run welcome and emoji (0.12.0).** A new install walks you through naming the computer and pairing with another, and any step can be skipped. Someone updating with a paired device doesn't see it, and **Settings** > **About** can show it again. The **😀** button by the message box adds an emoji where the cursor is. Windows 10's `Win`+`.` panel works there too. Emoji are ordinary text, so older versions of Roomie receive them as usual.
 - **Sounds and small animations (0.13.1).** Most Windows PCs can't vibrate, so these give Roomie its feel instead. Short, soft sounds announce a message in a conversation you aren't looking at, a file offered, a transfer finished or failed, and a pairing request. **Settings** > **Notifications** turns them off and can play a test sound, and they stay silent during Focus Assist and full-screen games or presentations. A message you send rises into place, an unread count pops, buttons respond to being pressed, a finished transfer shows a tick, and the drop area fades in. All the animations are off when animations are off in Windows.
-- **Next: Phase 11,** security and network testing and the MSIX release.
+- **Phase 11 (security, network testing and installer), 0.15.2, built and waiting for your test.** 0.15.2 keeps the notification icon from holding up the window, which took over a minute to open on one PC. 0.15.1 shows only the status under a name in a chat. 0.15.0 lets a group's owner delete it and a member leave it, and sends a device's new name to its paired devices. It also logs each step of startup, because on one PC the window never appeared after installing 0.14.0 and the cause is still unknown. It updates the message database, so an older Roomie can't open that data afterwards. A security review found and fixed eight problems, none of them in pairing or encryption: see [`docs/security-review.md`](docs/security-review.md). Roomie now follows the Windows high-contrast setting, and screen readers get sensible names for list rows. It also comes as an installable MSIX package, alongside the portable zip, which adds its own firewall rules and keeps your existing messages and pairings.
+
+### Testing 0.15.2 on the office PCs
+
+`packaging\build-msix.ps1` puts everything in `Desktop\Roomie-0.15.2`. Install it on every PC, because older versions can't take part in deleting, leaving or new names: they hear about them once they update. Copy that folder to each PC. Use as many of the PCs as you can, because three is the most that has been tested so far. A portable copy and the installed one share their data, so choose **Exit Roomie** in the old one first, and don't run both.
+
+**Installing**
+
+1. Double-click **Install Roomie.cmd** and allow the Windows prompt. Roomie should appear in the Start menu. If Windows refuses, your office's policy may block this kind of install: please send the message. The portable zip still works on that PC.
+2. Open it on a PC that already used Roomie. **Settings** > **About** should show 0.15.2, with your messages, paired devices and security fingerprint unchanged. If paired devices now show an identity warning, stop and report it. If no window appears within 30 seconds, don't uninstall: send the end of the newest file in `%LOCALAPPDATA%\Roomie\logs`, which says how far Roomie got.
+3. Windows Firewall shouldn't ask anything. Run `Get-NetFirewallRule | Where-Object DisplayName -like '*Roomie*'` in PowerShell: there should be rules for private and domain networks. Then run `Get-NetConnectionProfile`: `NetworkCategory` should be `Private` or `DomainAuthenticated`. The rules don't cover `Public`, so other PCs may not reach the installed Roomie there, and the install script warns about this but doesn't change it. If it says `Public` and this is your trusted office network, set it to **Private** under **Settings** > **Network & Internet** > **Properties**, or ask your IT team. Connect from another PC to confirm the rules work.
+4. Turn on **Start Roomie when I sign in to Windows**, then sign out and in: it should be in the notification area with no window.
+5. Run the installer again: it should finish without losing anything. Uninstall from **Settings** > **Apps**, and install again: your data should still be there.
+
+**Network**
+
+6. Pair and chat across all the PCs, including one group with everyone in it. Messages should arrive once, on every PC.
+7. Run a transfer of several GB and pull the cable part-way on a real pair of PCs, then plug it back in. It should pause within about 15 seconds and continue by itself. Repeat by closing Roomie on the receiver.
+8. Repeat 6 and 7 with one PC on Wi-Fi, moving it out of range if you can. Then send from Wi-Fi to cable, with chat running both ways. Note the speed.
+9. If a PC doesn't see the others, note how it connects. Guest Wi-Fi and separate office networks (VLANs) block discovery, and Roomie has no way yet to enter an address by hand.
+
+**The security fixes**
+
+10. On a paired device, change its name in **Settings**. Within a few seconds the other PCs should show the new name in **Chats** and **Devices**, and in any group with it. Do it again with one PC off: that PC should show the new name soon after it reconnects.
+11. Between two unpaired PCs, start pairing and choose **Cancel**, six times in ten minutes. The sixth should be refused with a message about too many attempts.
+
+**Groups**
+
+14. As a member, open a group and choose **Leave group**. It should say you left, and the other PCs should drop you from **Members** within a few seconds. Repeat with the owner's PC off: the owner should drop you after it reconnects. The owner can then invite you back.
+15. As the owner, choose **Delete group**. Every member's copy should say it was deleted and refuse new messages, with old messages still there. Repeat with one member's PC off, and with the owner closing Roomie straight after: the member should still find out when it reconnects, from the owner or another member.
+16. In an ended group, choose **Remove from this computer**. The group and its messages should go from that PC only.
+
+**Accessibility**
+
+12. Turn on a high-contrast theme (`Left Alt`+`Left Shift`+`Print Screen`, and the same keys to turn it off). Roomie should change straight away, with every screen readable and the open conversation outlined.
+13. If anyone uses a screen reader, try Narrator (`Win`+`Ctrl`+`Enter`) on **Devices** and **Chats**: it should read names and status, not device IDs.
 
 ### Testing sounds and animations on two PCs
 
@@ -151,6 +186,8 @@ dotnet test
 dotnet run --project src/Roomie.App
 ```
 
+To build the portable zip and the signed MSIX, run `packaging\build-msix.ps1`. It needs no administrator, and creates the signing certificate the first time, in your own certificate store. Updates only need the certificate's subject to stay the same, so if it's lost, a new one works once its `.cer` is on each PC, which the install script does.
+
 ## Layout
 
 | Project | Responsibility |
@@ -168,4 +205,5 @@ Runtime data lives in `%LOCALAPPDATA%\Roomie\` (`database`, `files`, `logs`, `co
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md): identity, pairing and the RMP protocol specification. This is authoritative.
+- [`docs/security-review.md`](docs/security-review.md): the threat model, what the Phase 11 review found, and the risks that remain.
 - [`docs/pre-architecture.md`](docs/pre-architecture.md): the original high-level blueprint.

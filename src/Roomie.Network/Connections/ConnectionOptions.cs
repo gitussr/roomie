@@ -43,6 +43,12 @@ public sealed class ConnectionOptions
     /// <summary>Sessions with unpaired devices are only for pairing, so few are needed at once.</summary>
     public int MaxUntrustedSessions { get; init; } = 8;
 
+    /// <summary>A device ID costs nothing to make up, so this stops one computer filling <see cref="MaxUntrustedSessions"/> by itself.</summary>
+    public int MaxUntrustedSessionsPerAddress { get; init; } = 2;
+
+    /// <summary>Pairing takes a handful of messages and heartbeats 12 a minute, so a session that sends far more than that isn't pairing.</summary>
+    public int MaxUntrustedMessagesPerMinute { get; init; } = 120;
+
     public int MaxPendingHandshakes { get; init; } = 16;
 
     public int MaxInboundPerAddressPerMinute { get; init; } = 20;

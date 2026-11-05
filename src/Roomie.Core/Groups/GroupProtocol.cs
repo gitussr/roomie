@@ -30,7 +30,10 @@ public sealed record GroupState(
 /// </summary>
 public sealed record GroupRemoval(string GroupId, Guid OwnerId, Guid RemovedDeviceId, int MembershipVersion, Guid EventId);
 
-/// <summary>A <see cref="GroupState"/> or <see cref="GroupRemoval"/> as JSON text, with the owner's signature over exactly that text.</summary>
+/// <summary>Ends a group for everyone. Members relay it, so it reaches them while the owner is offline.</summary>
+public sealed record GroupDeletion(string GroupId, Guid OwnerId, int MembershipVersion, Guid EventId);
+
+/// <summary>A <see cref="GroupState"/>, <see cref="GroupRemoval"/> or <see cref="GroupDeletion"/> as JSON text, with the owner's signature over exactly that text.</summary>
 public sealed record SignedGroupDocument(string Document, string Signature);
 
 public sealed record GroupInvitePayload(Guid InviteId, string Document, string Signature);
@@ -39,6 +42,9 @@ public sealed record GroupInvitePayload(Guid InviteId, string Document, string S
 public sealed record GroupAcceptPayload(string GroupId, Guid InviteId, bool Accepted);
 
 public sealed record GroupStateRequestPayload(string GroupId);
+
+/// <summary><c>GROUP_LEAVE</c>: a member asking its owner to remove it. The session proves who is asking.</summary>
+public sealed record GroupLeavePayload(string GroupId);
 
 /// <summary>Creating, signing and strictly checking group documents.</summary>
 public static class GroupProtocol
@@ -49,10 +55,13 @@ public static class GroupProtocol
     // The two kinds of document can't be mistaken for each other, or for a pairing signature.
     private const string StateDomain = "roomie-group-state-v1\0";
     private const string RemovalDomain = "roomie-group-removal-v1\0";
+    private const string DeletionDomain = "roomie-group-deletion-v1\0";
 
     public static SignedGroupDocument Sign(GroupState state, IDeviceSigner signer) => Sign(state, StateDomain, signer);
 
     public static SignedGroupDocument Sign(GroupRemoval removal, IDeviceSigner signer) => Sign(removal, RemovalDomain, signer);
+
+    public static SignedGroupDocument Sign(GroupDeletion deletion, IDeviceSigner signer) => Sign(deletion, DeletionDomain, signer);
 
     /// <summary>The name to use, or null if it isn't acceptable.</summary>
     public static string? NormalizeName(string? name)
@@ -89,11 +98,28 @@ public static class GroupProtocol
         return true;
     }
 
+    public static bool TryReadDeletion(SignedGroupDocument signedDocument, [NotNullWhen(true)] out GroupDeletion? deletion)
+    {
+        ArgumentNullException.ThrowIfNull(signedDocument);
+        deletion = Parse<GroupDeletion>(signedDocument.Document);
+        if (deletion is null || !ContentPayloads.IsIdentifier(deletion.GroupId) || deletion.OwnerId == Guid.Empty
+            || deletion.MembershipVersion < 1 || deletion.EventId == Guid.Empty)
+        {
+            deletion = null;
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>Whether the owner holding this key signed this membership.</summary>
     public static bool IsStateSignedBy(SignedGroupDocument signedDocument, string ownerPublicKey) => IsSignedBy(signedDocument, StateDomain, ownerPublicKey);
 
     /// <summary>Whether the owner holding this key signed this removal.</summary>
     public static bool IsRemovalSignedBy(SignedGroupDocument signedDocument, string ownerPublicKey) => IsSignedBy(signedDocument, RemovalDomain, ownerPublicKey);
+
+    /// <summary>Whether the owner holding this key deleted this group.</summary>
+    public static bool IsDeletionSignedBy(SignedGroupDocument signedDocument, string ownerPublicKey) => IsSignedBy(signedDocument, DeletionDomain, ownerPublicKey);
 
     /// <summary>Whether the key a state names for its owner is the one pinned for that device when pairing.</summary>
     public static bool OwnerKeyMatches(GroupState state, string pinnedFingerprint)
@@ -116,6 +142,16 @@ public static class GroupProtocol
 
     public static RmpPayloadCheck CheckRemoval(JsonElement payload) =>
         SessionPayloads.TryDeserialize<SignedGroupDocument>(payload) is { } signedDocument && TryReadRemoval(signedDocument, out _)
+            ? RmpPayloadCheck.Valid
+            : RmpPayloadCheck.Malformed;
+
+    public static RmpPayloadCheck CheckDeletion(JsonElement payload) =>
+        SessionPayloads.TryDeserialize<SignedGroupDocument>(payload) is { } signedDocument && TryReadDeletion(signedDocument, out _)
+            ? RmpPayloadCheck.Valid
+            : RmpPayloadCheck.Malformed;
+
+    public static RmpPayloadCheck CheckLeave(JsonElement payload) =>
+        SessionPayloads.TryDeserialize<GroupLeavePayload>(payload) is { } leave && ContentPayloads.IsIdentifier(leave.GroupId)
             ? RmpPayloadCheck.Valid
             : RmpPayloadCheck.Malformed;
 

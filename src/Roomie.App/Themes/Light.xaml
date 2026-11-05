@@ -23,4 +23,7 @@
     <SolidColorBrush x:Key="OnlineBrush" Color="#2E8B57" />
     <SolidColorBrush x:Key="OfflineBrush" Color="#A69C9A" />
     <SolidColorBrush x:Key="ScrimBrush" Color="#F2FFFFFF" />
+    <!-- Only the high-contrast colours draw these, where a change of fill alone wouldn't show. -->
+    <SolidColorBrush x:Key="RowLineBrush" Color="Transparent" />
+    <Thickness x:Key="HoverLineThickness">1</Thickness>
 </ResourceDictionary>

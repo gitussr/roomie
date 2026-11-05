@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Roomie.Core.Connections;
 using Roomie.Core.Files;
+using Roomie.Core.Notifications;
 using Roomie.Core.Protocol;
 
 namespace Roomie.Network.Connections;
@@ -48,6 +49,8 @@ public sealed partial class PeerSession : IAsyncDisposable
     private readonly RmpDispatcher _dispatcher;
     private readonly RmpNegotiatedSession _negotiated;
     private readonly SlidingWindowRateLimiter _rejections;
+    private readonly SlidingWindowRateLimiter _reportedErrors;
+    private readonly SlidingWindowRateLimiter _untrustedMessages;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly TaskCompletionSource<SessionCloseInfo> _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -77,6 +80,10 @@ public sealed partial class PeerSession : IAsyncDisposable
         _dispatcher = dispatcher;
         _negotiated = negotiated;
         _rejections = new SlidingWindowRateLimiter(time, options.MaxRejectedMessagesPerMinute, TimeSpan.FromMinutes(1), maxTracked: 1);
+
+        // A well-behaved peer stops at its own limit of refusals, each answered by one report, so twice that has room to spare.
+        _reportedErrors = new SlidingWindowRateLimiter(time, options.MaxRejectedMessagesPerMinute * 2, TimeSpan.FromMinutes(1), maxTracked: 1);
+        _untrustedMessages = new SlidingWindowRateLimiter(time, options.MaxUntrustedMessagesPerMinute, TimeSpan.FromMinutes(1), maxTracked: 1);
 
         LocalDeviceId = localDeviceId;
         RemoteDeviceId = peer.DeviceId;
@@ -228,6 +235,12 @@ public sealed partial class PeerSession : IAsyncDisposable
 
                 Interlocked.Exchange(ref _lastReceivedTicks, _time.GetUtcNow().UtcTicks);
 
+                if (!IsTrusted && !_untrustedMessages.TryAcquire(RemoteEndPoint.Address))
+                {
+                    await FailAsync(RmpErrorCodes.RateLimited, "Too many messages from a device that isn't paired.").ConfigureAwait(false);
+                    return;
+                }
+
                 if (frame.Value.Type != RmpFrameType.Control)
                 {
                     if (!await HandleChunkAsync(frame.Value, cancellationToken).ConfigureAwait(false))
@@ -309,6 +322,12 @@ public sealed partial class PeerSession : IAsyncDisposable
                 return false;
 
             case RmpMessageTypes.Error:
+                if (!_reportedErrors.TryAcquire(RemoteEndPoint.Address))
+                {
+                    await FailAsync(RmpErrorCodes.RateLimited, "Too many error reports.", envelope.MessageId).ConfigureAwait(false);
+                    return false;
+                }
+
                 await HandleErrorAsync(envelope, cancellationToken).ConfigureAwait(false);
                 return true;
         }
@@ -342,7 +361,8 @@ public sealed partial class PeerSession : IAsyncDisposable
             return;
         }
 
-        LogPeerReportedError(_logger, RemoteDeviceId, reported.Code, reported.Message);
+        // On one line, so another device's words can't pass as lines of this computer's own log.
+        LogPeerReportedError(_logger, RemoteDeviceId, reported.Code, NotificationText.Clean(reported.Message, SessionPayloads.MaxErrorMessageLength));
         await _dispatcher.DispatchErrorAsync(this, envelope, cancellationToken).ConfigureAwait(false);
     }
 
@@ -370,6 +390,10 @@ public sealed partial class PeerSession : IAsyncDisposable
         try
         {
             using var timer = new PeriodicTimer(_heartbeatInterval, _time);
+
+            // Not awaited in the loop: when the other side stops reading, a send waits for as long as TCP stays up,
+            // which can be forever, and this loop is what notices that nothing is coming back.
+            var sending = Task.CompletedTask;
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
                 var silence = _time.GetUtcNow() - new DateTimeOffset(Interlocked.Read(ref _lastReceivedTicks), TimeSpan.Zero);
@@ -379,7 +403,11 @@ public sealed partial class PeerSession : IAsyncDisposable
                     return;
                 }
 
-                await SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.Empty, cancellationToken).ConfigureAwait(false);
+                if (sending.IsCompleted)
+                {
+                    await sending.ConfigureAwait(false);
+                    sending = SendAsync(RmpMessageTypes.Heartbeat, SessionPayloads.Empty, cancellationToken);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

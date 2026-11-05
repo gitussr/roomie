@@ -17,7 +17,11 @@ namespace Roomie.App.ViewModels;
 
 /// <summary>The Settings screen. Every change takes effect and is saved at once.</summary>
 /// <summary>A built-in avatar to choose from.</summary>
-public sealed record AvatarOption(int Id, string Name, AvatarVisual Visual, bool IsSelected);
+public sealed record AvatarOption(int Id, string Name, AvatarVisual Visual, bool IsSelected)
+{
+    /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
+    public override string ToString() => Name;
+}
 
 public sealed partial class SettingsViewModel : ObservableObject
 {

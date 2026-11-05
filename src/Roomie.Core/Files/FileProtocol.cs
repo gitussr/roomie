@@ -206,7 +206,12 @@ public static class SafeFilename
     {
         ".exe", ".com", ".scr", ".pif", ".bat", ".cmd", ".msi", ".msp", ".msc", ".cpl", ".dll", ".sys", ".ocx", ".hta", ".lnk", ".url", ".reg", ".inf",
         ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".jar", ".appx", ".msix", ".application", ".gadget", ".scf", ".chm",
-        ".docm", ".xlsm", ".pptm",
+        ".ws", ".wsc", ".vb", ".sct", ".shb", ".mst", ".hlp", ".mht", ".mhtml", ".ade", ".adp", ".mde", ".accde", ".wsb", ".rdp", ".py", ".pyw",
+        ".appxbundle", ".msixbundle", ".appinstaller", ".diagcab", ".library-ms", ".search-ms", ".settingcontent-ms",
+        ".docm", ".dotm", ".xlsm", ".xltm", ".xlam", ".xll", ".pptm", ".potm", ".ppam",
+
+        // Opening one of these shows what's inside it, and those files may not carry the warning from this one.
+        ".iso", ".img", ".vhd", ".vhdx",
     };
 
     public static string Create(string offered)

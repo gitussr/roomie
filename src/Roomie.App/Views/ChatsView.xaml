@@ -65,6 +65,7 @@
                                             <Style.Triggers>
                                                 <DataTrigger Binding="{Binding IsOpen}" Value="True">
                                                     <Setter Property="Background" Value="{DynamicResource SelectedBrush}" />
+                                                    <Setter Property="BorderBrush" Value="{DynamicResource RowLineBrush}" />
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
@@ -135,11 +136,7 @@
                         <views:AvatarView DockPanel.Dock="Left" Width="40" Height="40" Margin="0,0,12,0" VerticalAlignment="Center" Avatar="{Binding Chat.PeerAvatar}" />
                         <StackPanel>
                             <TextBlock Text="{Binding Chat.PeerName}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                            <TextBlock Style="{StaticResource MutedText}">
-                                <Run Text="{Binding Chat.PeerDisplayId, Mode=OneWay}" FontFamily="Consolas" />
-                                <Run Text="·" />
-                                <Run Text="{Binding Chat.Connection, Mode=OneWay}" />
-                            </TextBlock>
+                            <TextBlock Style="{StaticResource MutedText}" Text="{Binding Chat.Connection}" TextTrimming="CharacterEllipsis" />
                         </StackPanel>
                     </DockPanel>
                 </Border>
@@ -194,15 +191,21 @@
                     </ScrollViewer>
                 </Expander>
 
+                <!-- Always in view, so ending a group doesn't depend on finding it in the list above. -->
+                <Button DockPanel.Dock="Top" Margin="18,8,18,0" Padding="10,2" HorizontalAlignment="Right"
+                        Content="{Binding Chat.GroupActionText}" Command="{Binding Chat.GroupActionCommand}"
+                        Visibility="{Binding Chat.HasGroupAction, Converter={StaticResource BoolToVisibility}}" />
+
                 <!-- Composer -->
                 <Border DockPanel.Dock="Bottom" Padding="14,10" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,1,0,0">
                     <StackPanel>
                         <TextBlock Margin="0,0,0,6" Text="{Binding Chat.Problem}" Style="{StaticResource ProblemText}" />
                         <TextBlock Margin="0,0,0,6" Text="{Binding Chat.SendError}" Style="{StaticResource ProblemText}" />
+                        <!-- The buttons and a one-line message box share one height. A longer message grows the box upwards. -->
                         <DockPanel>
-                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="18,6" VerticalAlignment="Bottom"
+                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="18,0" Height="38" VerticalAlignment="Bottom"
                                     Content="Send" Style="{StaticResource PrimaryButton}" Command="{Binding Chat.SendCommand}" />
-                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="10,6" VerticalAlignment="Bottom"
+                            <Button DockPanel.Dock="Right" Margin="8,0,0,0" Padding="10,0" Height="38" VerticalAlignment="Bottom"
                                     Command="{Binding Chat.SendFileCommand}"
                                     Visibility="{Binding Chat.IsDirect, Converter={StaticResource BoolToVisibility}}">
                                 <!-- Hashing a file of several GB takes a while before the offer appears. -->
@@ -217,7 +220,7 @@
                                     </Style>
                                 </Button.Style>
                             </Button>
-                            <Button x:Name="EmojiButton" DockPanel.Dock="Right" Margin="8,0,0,0" Padding="9,5" VerticalAlignment="Bottom"
+                            <Button x:Name="EmojiButton" DockPanel.Dock="Right" Margin="8,0,0,0" Padding="9,0" Height="38" VerticalAlignment="Bottom"
                                     IsEnabled="{Binding Chat.CanCompose}" Click="OnEmojiButton" ToolTip="Add an emoji"
                                     AutomationProperties.Name="Add an emoji">
                                 <TextBlock Text="😀" FontFamily="Segoe UI Emoji" FontSize="15" />
@@ -246,7 +249,7 @@
                             </Popup>
                             <TextBox x:Name="Composer" Text="{Binding Chat.Draft, UpdateSourceTrigger=PropertyChanged}"
                                      IsEnabled="{Binding Chat.CanCompose}" AcceptsReturn="True" TextWrapping="Wrap"
-                                     MaxHeight="120" MinHeight="32" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Message">
+                                     MaxHeight="120" MinHeight="38" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Message">
                                 <TextBox.InputBindings>
                                     <KeyBinding Key="Enter" Command="{Binding Chat.SendCommand}" />
                                 </TextBox.InputBindings>

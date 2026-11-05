@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- @VERSION@ and @PUBLISHER@ are filled in by build-msix.ps1. -->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+    xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
+    xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+    IgnorableNamespaces="uap uap3 rescap desktop desktop2 desktop6">
+
+  <Identity Name="Roomie" Publisher="@PUBLISHER@" Version="@VERSION@" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Roomie</DisplayName>
+    <PublisherDisplayName>Roomie</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+
+    <!-- Roomie's data stays in %LOCALAPPDATA%\Roomie and its sign-in setting in the real Run key. Without these, Windows
+         would redirect both to a private copy: devices paired in a portable copy would be lost, and start-at-sign-in
+         would do nothing. It also means uninstalling keeps messages and pairings. -->
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+  </Properties>
+
+  <!-- The two settings above need Windows 10 version 2004 (build 19041) or later. -->
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22631.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="Roomie" Executable="Roomie\Roomie.App.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+          DisplayName="Roomie"
+          Description="Chat and file sharing between computers on your network"
+          BackgroundColor="transparent"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png" />
+
+      <Extensions>
+        <!-- A path that stays the same across updates, for start-at-sign-in. -->
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="Roomie\Roomie.App.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="roomie.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Extensions>
+    <!-- Same ports as architecture.md §12. Domain as well as private, because office PCs joined to a domain are on
+         the domain profile. Never public. -->
+    <desktop2:Extension Category="windows.firewallRules">
+      <desktop2:FirewallRules Executable="Roomie\Roomie.App.exe">
+        <desktop2:Rule Direction="in" IPProtocol="UDP" LocalPortMin="45820" LocalPortMax="45820" Profile="domainAndPrivate" />
+        <desktop2:Rule Direction="in" IPProtocol="TCP" LocalPortMin="45821" LocalPortMax="45821" Profile="domainAndPrivate" />
+      </desktop2:FirewallRules>
+    </desktop2:Extension>
+  </Extensions>
+</Package>

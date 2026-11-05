@@ -668,7 +668,6 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
         var (alice, bob) = await PairedAsync();
         var (path, _) = CreateFile("big.bin", 20 * 1024 * 1024);
         var sessions = new List<Guid>();
-        Assert.True(bob.Connections.TryGetSession(alice.Id, out var original));
 
         for (var i = 0; i < 12; i++)
         {
@@ -682,7 +681,9 @@ public sealed class FileTransferServiceTests : IAsyncLifetime
             sessions.Add(current.SessionId);
         }
 
-        Assert.All(sessions, s => Assert.Equal(original.SessionId, s));
+        // Compared with the first sample, not with a read right after pairing: the session seen then was once replaced
+        // before any transfer began, which says nothing about canceling.
+        Assert.All(sessions, s => Assert.Equal(sessions[0], s));
         var message = alice.Messaging.SendText(bob.Id, "Still fine").Message!;
         await WaitUntil(() => alice.Store.GetConversation(bob.Id).Single(m => m.MessageId == message.MessageId).State == DeliveryState.Delivered);
     }

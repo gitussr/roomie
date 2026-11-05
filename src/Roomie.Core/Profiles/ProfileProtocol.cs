@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text.Json;
+using Roomie.Core.Identity;
 using Roomie.Core.Protocol;
 
 namespace Roomie.Core.Profiles;
@@ -66,6 +67,9 @@ public sealed class AvatarChoice
 /// <summary>The payload of a <c>PROFILE_UPDATE</c>: at most one of a built-in avatar and a picture. Neither clears it.</summary>
 public sealed record ProfileUpdatePayload(int? Preset = null, string? Picture = null);
 
+/// <summary>The payload of a <c>PROFILE_NAME</c>: the name this device goes by.</summary>
+public sealed record ProfileNamePayload(string Username);
+
 /// <summary>
 /// The rules for a device's picture (architecture.md §15). A picture comes from another device, so it is held to one
 /// exact format: a small square PNG. Its size is known before anything decodes it, so it can't be a decompression bomb.
@@ -96,6 +100,13 @@ public static class ProfileProtocol
         ArgumentNullException.ThrowIfNull(choice);
         return new ProfileUpdatePayload(choice.Preset, choice.PictureBytes is { } png ? Convert.ToBase64String(png.Span) : null);
     }
+
+    /// <summary>Only a name already in its normal form, the same rule as everywhere else names are saved.</summary>
+    public static RmpPayloadCheck CheckName(JsonElement payload) =>
+        SessionPayloads.TryDeserialize<ProfileNamePayload>(payload) is { Username: { } name }
+        && Username.TryNormalize(name, out var normalized, out _) && normalized == name
+            ? RmpPayloadCheck.Valid
+            : RmpPayloadCheck.Malformed;
 
     public static RmpPayloadCheck CheckUpdate(JsonElement payload)
     {
