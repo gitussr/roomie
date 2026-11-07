@@ -283,7 +283,20 @@
                                         </Border.Style>
                                         <StackPanel>
                                             <TextBlock Margin="0,0,0,2" Text="{Binding Sender}" FontSize="12" FontWeight="SemiBold" Style="{StaticResource CollapsedWhenEmpty}" />
-                                            <TextBox Text="{Binding Text, Mode=OneWay}" Style="{StaticResource SelectableText}" />
+                                            <TextBox Text="{Binding Text, Mode=OneWay}">
+                                                <TextBox.Style>
+                                                    <Style TargetType="TextBox" BasedOn="{StaticResource SelectableText}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding HasLinks}" Value="True">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBox.Style>
+                                            </TextBox>
+                                            <TextBlock views:MessageText.Text="{Binding Text, Mode=OneWay}" TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource TextBrush}"
+                                                       Visibility="{Binding HasLinks, Converter={StaticResource BoolToVisibility}}" />
                                             <TextBlock Margin="0,3,0,0" FontSize="11" TextWrapping="Wrap">
                                                 <TextBlock.Style>
                                                     <Style TargetType="TextBlock">

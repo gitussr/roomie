@@ -21,6 +21,9 @@ namespace Roomie.App.ViewModels;
 /// <summary>One message as shown in the conversation.</summary>
 public sealed record ChatBubble(Guid MessageId, string Text, bool IsMine, string Time, string Status, bool IsProblem, string? Sender = null)
 {
+    /// <summary>A message with a web address in it is shown with clickable links instead of as selectable text.</summary>
+    public bool HasLinks => MessageLinks.HasLink(Text);
+
     /// <summary>What a screen reader says for this row. Without it, the record's generated text is read out, IDs and all.</summary>
     public override string ToString() => string.Join(", ", new[] { Sender, Text, Time, Status }.Where(part => !string.IsNullOrEmpty(part)));
 }
