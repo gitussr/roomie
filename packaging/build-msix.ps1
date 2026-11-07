@@ -68,16 +68,43 @@ Copy-Item $publish (Join-Path $layout 'Roomie') -Recurse
 
 # The pictures Windows wants, from the app's own logo.
 Add-Type -AssemblyName System.Drawing
-$logo = [Drawing.Image]::FromFile((Join-Path $repo 'src\Roomie.App\Assets\roomie.png'))
+$logo = [Drawing.Bitmap]::FromFile((Join-Path $repo 'src\Roomie.App\Assets\roomie.png'))
 try {
-    foreach ($item in @(@('StoreLogo', 50), @('Square44x44Logo', 44), @('Square150x150Logo', 150))) {
-        $bitmap = New-Object Drawing.Bitmap $item[1], $item[1]
+    # The logo has a clear border. Icons leave it off, so the red square fills them like other apps' icons.
+    $left = $logo.Width; $top = $logo.Height; $right = -1; $bottom = -1
+    for ($y = 0; $y -lt $logo.Height; $y++) {
+        for ($x = 0; $x -lt $logo.Width; $x++) {
+            if ($logo.GetPixel($x, $y).A -gt 0) {
+                if ($x -lt $left) { $left = $x }; if ($x -gt $right) { $right = $x }
+                if ($y -lt $top) { $top = $y }; if ($y -gt $bottom) { $bottom = $y }
+            }
+        }
+    }
+    $side = [Math]::Max($right - $left + 1, $bottom - $top + 1)
+    $crop = New-Object Drawing.RectangleF ($left + ($right - $left + 1 - $side) / 2), ($top + ($bottom - $top + 1 - $side) / 2), $side, $side
+
+    function Save-Logo([string]$name, [int]$size, [bool]$full) {
+        $bitmap = New-Object Drawing.Bitmap $size, $size
         $graphics = [Drawing.Graphics]::FromImage($bitmap)
         $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $graphics.DrawImage($logo, 0, 0, $item[1], $item[1])
+        $graphics.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $target = New-Object Drawing.RectangleF 0, 0, $size, $size
+        $source = if ($full) { $crop } else { New-Object Drawing.RectangleF 0, 0, $logo.Width, $logo.Height }
+        $graphics.DrawImage($logo, $target, $source, [Drawing.GraphicsUnit]::Pixel)
         $graphics.Dispose()
-        $bitmap.Save((Join-Path $layout "Assets\$($item[0]).png"), [Drawing.Imaging.ImageFormat]::Png)
+        $bitmap.Save((Join-Path $layout "Assets\$name.png"), [Drawing.Imaging.ImageFormat]::Png)
         $bitmap.Dispose()
+    }
+
+    Save-Logo 'StoreLogo' 50 $false
+    Save-Logo 'Square44x44Logo' 44 $false
+    Save-Logo 'Square150x150Logo' 150 $false
+
+    # The taskbar and the Start menu's list use these. Without them, Windows 10 shrinks the logo onto a square
+    # of the user's accent colour. "Unplated" means drawn as it is; "lightunplated" is for a light taskbar.
+    foreach ($size in 16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256) {
+        Save-Logo "Square44x44Logo.targetsize-$($size)_altform-unplated" $size $true
+        Save-Logo "Square44x44Logo.targetsize-$($size)_altform-lightunplated" $size $true
     }
 }
 finally {
@@ -89,6 +116,23 @@ $manifest = (Get-Content (Join-Path $PSScriptRoot 'AppxManifest.template.xml') -
     Replace('@VERSION@', "$version.0").
     Replace('@PUBLISHER@', $Publisher)
 [IO.File]::WriteAllText((Join-Path $layout 'AppxManifest.xml'), $manifest, (New-Object Text.UTF8Encoding $false))
+
+# Windows finds the taskbar sizes above through this index; without it, it only ever sees Square44x44Logo.png.
+# Only the Assets folder is indexed, not the program next to it.
+$makepri = Join-Path $binary 'makepri.exe'
+$priConfig = Join-Path $work 'priconfig.xml'
+$said = & $makepri createconfig /cf $priConfig /dq en-US /pv 10.0.0 /o 2>&1
+if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed:`n$($said -join "`n")" }
+$config = [xml](Get-Content $priConfig -Raw)
+$config.SelectNodes('//packaging') | ForEach-Object { $null = $_.ParentNode.RemoveChild($_) }
+$config.SelectNodes('//indexer-config[@type="folder"]') | ForEach-Object {
+    $exclude = $config.CreateElement('exclude')
+    $exclude.SetAttribute('type', 'path'); $exclude.SetAttribute('value', 'Roomie'); $exclude.SetAttribute('doNotTraverse', 'true'); $exclude.SetAttribute('doNotIndex', 'true')
+    $null = $_.AppendChild($exclude)
+}
+$config.Save($priConfig)
+$said = & $makepri new /pr $layout /cf $priConfig /mn (Join-Path $layout 'AppxManifest.xml') /of (Join-Path $layout 'resources.pri') /o 2>&1
+if ($LASTEXITCODE -ne 0) { throw "makepri new failed:`n$($said -join "`n")" }
 
 $msix = Join-Path $out "Roomie-$version.msix"
 Write-Host 'Packing...'
